@@ -1,0 +1,16 @@
+[package]
+name = "fourleaf"
+version = "0.1.0"
+authors = ["Jason Lingle"]
+license = "MIT/Apache-2.0"
+readme = "README.md"
+repository = "https://github.com/AltSysrq/fourleaf"
+documentation = "https://docs.rs/fourleaf"
+keywords = ["serialization", "serialize", "encode", "binary"]
+
+description = """
+A simple, tag-based binary serialisation format.
+"""
+
+[dependencies]
+
