@@ -85,14 +85,14 @@ pub enum DescriptorType {
 }
 
 enum_from_primitive! {
-/// The interpretation of a terminator `Descriptor`.
+/// The interpretation of a special `Descriptor`.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
 #[allow(missing_docs)]
-pub enum TerminatorType {
+pub enum SpecialType {
     EndOfStruct = 0x00,
     EndOfDoc = 0x40,
     Error = 0x80,
-    _Reserved3 = 0xC0,
+    Padding = 0xC0,
 }
 }
 
@@ -102,8 +102,8 @@ pub enum ParsedDescriptor {
     /// A normal descriptor, indicating a field tag and the type which follows
     /// it (if any). The tag must always be in the range 1..63 (inclusive).
     Pair(DescriptorType, u8),
-    /// A terminator descriptor.
-    Terminator(TerminatorType),
+    /// A special descriptor.
+    Special(SpecialType),
 }
 
 impl Descriptor {
@@ -113,7 +113,7 @@ impl Descriptor {
         let tag = self.0 & 0x3F;
 
         if 0 == tag {
-            ParsedDescriptor::Terminator(TerminatorType::from_u8(ty).unwrap())
+            ParsedDescriptor::Special(SpecialType::from_u8(ty).unwrap())
         } else {
             ParsedDescriptor::Pair(DescriptorType::from_u8(ty).unwrap(), tag)
         }
@@ -127,7 +127,7 @@ impl From<ParsedDescriptor> for Descriptor {
                 debug_assert!(tag >= 1 && tag <= 63);
                 tag | (ty as u8)
             },
-            ParsedDescriptor::Terminator(ty) => ty as u8
+            ParsedDescriptor::Special(ty) => ty as u8
         })
     }
 }
@@ -300,10 +300,10 @@ mod test {
             } }
         }
 
-        test!(0x00, ParsedDescriptor::Terminator(TerminatorType::EndOfStruct));
-        test!(0x40, ParsedDescriptor::Terminator(TerminatorType::EndOfDoc));
-        test!(0x80, ParsedDescriptor::Terminator(TerminatorType::Error));
-        test!(0xC0, ParsedDescriptor::Terminator(TerminatorType::_Reserved3));
+        test!(0x00, ParsedDescriptor::Special(SpecialType::EndOfStruct));
+        test!(0x40, ParsedDescriptor::Special(SpecialType::EndOfDoc));
+        test!(0x80, ParsedDescriptor::Special(SpecialType::Error));
+        test!(0xC0, ParsedDescriptor::Special(SpecialType::Padding));
         test!(0x01, ParsedDescriptor::Pair(DescriptorType::Null, 1));
         test!(0x41, ParsedDescriptor::Pair(DescriptorType::Integer, 1));
         test!(0x81, ParsedDescriptor::Pair(DescriptorType::Blob, 1));

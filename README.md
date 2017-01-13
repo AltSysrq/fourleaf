@@ -63,18 +63,18 @@ optionally terminated with a terminating descriptor.
 
 A descriptor is simply a one-byte value. The upper two bits indicate the type
 (0 = null, 1 = integer, 2 = blob, 3 = struct) and the lower 6 indicate the tag.
-Except in terminating descriptors, the type indicates how the value following
+Except in special descriptors, the type indicates how the value following
 the descriptor is interpreted.
 
 The tag identifies the field whose value in the struct is being set. Valid tags
-are in the range from 1 to 63; a descriptor with a tag of 0 is a terminating
+are in the range from 1 to 63; a descriptor with a tag of 0 is a special
 descriptor.
 
 The descriptor/value pairs in a struct define an ordered sequence of values for
 that field. What exactly varying numbers of values mean depends on what is
 being deserialised.
 
-There are four types of terminating descriptor, keyed off the descriptor type:
+There are four types of special descriptor, keyed off the descriptor type:
 
 0 - Followed by no data. End of struct (continue parsing the containing struct,
 if any, with the next byte).
@@ -87,7 +87,7 @@ should return to the caller. This is used to allow streaming producers to
 produce some kind of informative failure after they have committed to writing a
 stream.
 
-3 - Reserved.
+3 - Padding. The byte is ignored.
 
 ## Logical Formats
 
