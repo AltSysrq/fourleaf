@@ -163,6 +163,21 @@ pub struct Blob<'d, R : 'd> {
     len: u64,
 }
 
+/// Check that advancing `pos` by `n` will not cause overflow.
+///
+/// Generally, the inherent method on `Decoder` should be used, but in a few
+/// cases the borrow checker cannot accept that, so this global function can
+/// be called instead.
+fn check_advance_pos(pos: u64, n: u64) -> io::Result<()> {
+    if u64::MAX - pos < n {
+        Err(io::Error::new(
+            io::ErrorKind::Other,
+            "new position would be greater than u64::MAX"))
+    } else {
+        Ok(())
+    }
+}
+
 #[derive(Debug)]
 struct DecoderInput<'d, R : 'd>(&'d mut Decoder<R>, bool);
 impl<'d, R : Read> Read for DecoderInput<'d, R> {
@@ -179,6 +194,16 @@ impl<'d, R : Read> Read for DecoderInput<'d, R> {
         } else {
             Ok(n)
         }
+    }
+}
+impl<'d, R : BufRead> BufRead for DecoderInput<'d, R> {
+    fn fill_buf(&mut self) -> io::Result<&[u8]> {
+        self.0.fill_buf_nb()
+    }
+
+    fn consume(&mut self, amt: usize) {
+        self.0.input.consume(amt);
+        self.0.pos += amt as u64;
     }
 }
 impl<'d, W : Write> Write for DecoderInput<'d, W> {
@@ -203,13 +228,7 @@ impl<R> Decoder<R> {
     }
 
     fn check_advance_pos(&self, n: u64) -> io::Result<()> {
-        if u64::MAX - self.pos < n {
-            Err(io::Error::new(
-                io::ErrorKind::Other,
-                "new position would be greater than u64::MAX"))
-        } else {
-            Ok(())
-        }
+        check_advance_pos(self.pos, n)
     }
 }
 
@@ -446,6 +465,16 @@ impl<R : Read> Decoder<R> {
     }
 }
 
+impl<R : BufRead> Decoder<R> {
+    /// Like `BufRead::fill_buf()`. Exists here so that `Blob` can get a slice
+    /// with the appropriate lifetime.
+    fn fill_buf_nb(&mut self) -> io::Result<&[u8]> {
+        let ret = self.input.fill_buf()?;
+        check_advance_pos(self.pos, ret.len() as u64)?;
+        Ok(ret)
+    }
+}
+
 impl<'d, R : 'd> Blob<'d, R> {
     /// Returns the size of this blob, in bytes.
     pub fn len(&self) -> u64 {
@@ -572,6 +601,18 @@ impl<'d, R : Read + 'd> Read for Blob<'d, R> {
 
         let n = self.decoder.input(false).read(buf)?;
         Ok(n)
+    }
+}
+
+impl<'d, R : BufRead + 'd> BufRead for Blob<'d, R> {
+    fn fill_buf(&mut self) -> io::Result<&[u8]> {
+        let avail = min(usize::MAX as u64, self.remaining()) as usize;
+        let ret = self.decoder.fill_buf_nb()?;
+        Ok(&ret[..min(avail, ret.len())])
+    }
+    fn consume(&mut self, amt: usize) {
+        debug_assert!((amt as u64) <= self.remaining());
+        self.decoder.input(false).consume(amt)
     }
 }
 
@@ -742,7 +783,7 @@ impl<'d, R : 'd> Value<'d, R> {
 
 #[cfg(test)]
 mod test {
-    use std::io::{self, Read, Seek, Write};
+    use std::io::{self, BufRead, Read, Seek, Write};
     use std::str;
 
     use super::*;
@@ -1216,6 +1257,30 @@ mod test {
             assert_eq!(11, blob.len());
             assert!(blob.slice().is_none());
             assert!(blob.slice_mut().is_none());
+        }
+    }
+
+    #[test]
+    fn blob_bufread() {
+        let mut dec = decoder("81 0B 'hello world' 02");
+        {
+            let mut field = dec.next_field().unwrap().unwrap();
+            assert_eq!(1, field.tag);
+            let blob = field.value.to_blob().unwrap();
+
+            assert_eq!(b"hello world", blob.fill_buf().unwrap());
+            blob.consume(6);
+            assert_eq!(6, blob.inner_pos());
+            assert_eq!(8, blob.decoder_pos());
+            assert_eq!(5, blob.remaining());
+
+            assert_eq!(b"world", blob.fill_buf().unwrap());
+        }
+        {
+            let field = dec.next_field().unwrap().unwrap();
+            assert_eq!(2, field.tag);
+            assert_eq!(13, field.pos);
+            field.value.to_null().unwrap();
         }
     }
 }
