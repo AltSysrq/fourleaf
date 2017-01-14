@@ -29,6 +29,9 @@ Features:
   about what comes later in the stream. Similarly, values can be streamed in
   iteratively.
 
+- Padding and exception elements can be used for in-band signaling in streaming
+  protocols.
+
 Non-features:
 
 - This is not built upon serde, so you don't get interoperation with existing
@@ -37,7 +40,8 @@ Non-features:
 ## Physical Format
 
 The physical format is based around exactly four types: null, integers, blobs,
-and structs. The top-level of the format is always a struct.
+and structs. The top-level of the format is always a struct or a flat stream of
+structs.
 
 ### null
 
@@ -82,12 +86,14 @@ if any, with the next byte).
 1 - Followed by no data. End of document; stop parsing this struct and all
 containers.
 
-2 - Followed by a blob. The blob specifies an error message which the parser
-should return to the caller. This is used to allow streaming producers to
-produce some kind of informative failure after they have committed to writing a
-stream.
+2 - Followed by a blob. The blob can contain arbitrary data which can be used
+for in-band signalling. Typically, it is used as an error message indicating
+the encoder failed unexpectedly. This is intended to allow streaming producers
+to produce some kind of informative failure after they have committed to
+writing a stream.
 
-3 - Padding. The byte is ignored.
+3 - Padding. The byte is ignored. This could also be used as a heartbeat value
+in realtime streaming protocols.
 
 ## Logical Formats
 

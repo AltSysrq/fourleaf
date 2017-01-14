@@ -47,6 +47,24 @@ pub struct Decoder<R> {
     graceful_eof: bool,
 }
 
+/// An element decoded from a fourleaf stream.
+#[derive(Debug)]
+pub enum Element<D> {
+    /// A normal tag/value pair representing a field.
+    Field(Field<D>),
+    /// The end of the struct currently being decoded.
+    EndOfStruct,
+    /// An explicit end to the whole document, closing all structs being
+    /// decoded.
+    EndOfDoc,
+    /// An exception inserted by the encoder. The blob is usually treated as an
+    /// error message as sorts, but this could also be used for in-band
+    /// signalling.
+    Exception(Blob<D>),
+    /// A byte of padding.
+    Padding,
+}
+
 /// A field decoded from a fourleaf stream.
 #[derive(Debug)]
 pub struct Field<D> {
@@ -209,18 +227,62 @@ impl<'a, R : Input<'a>> Decoder<R> {
     ///
     /// Padding is implicitly skipped.
     ///
-    /// If an error descriptor is encountered, up to 256 bytes of the message
-    /// are read, converted to a string lossily, and returned as an error.
-    /// Subsequent calls would continue in the stream immediately after the
-    /// error message.
+    /// If an exception descriptor is encountered, up to 256 bytes of the
+    /// message are read, converted to a string lossily, and returned as an
+    /// error. Subsequent calls would continue in the stream immediately after
+    /// the error message.
     ///
     /// If the field is a blob, it is not read in by this call. If the caller
     /// does not fully consume such a blob itself, the next call to
     /// `next_field` will do so.
+    ///
+    /// If you want to use padding or exceptions as in-band signalling, see
+    /// `next_element()` instead.
     pub fn next_field(&mut self)
                       -> io::Result<Option<Field<&mut Self>>> {
+        match self.next_element_impl(true)? {
+            Element::Padding => unreachable!(),
+            Element::EndOfStruct | Element::EndOfDoc => return Ok(None),
+            Element::Field(field) => return Ok(Some(field)),
+            Element::Exception(blob) => {
+                // XXX If we don't explicitly give `blob` a type here, rustc
+                // seems to think that `'a` is a free lifetime.
+                let mut blob: Blob<&mut Decoder<R>> = blob;
+                let message = blob.get_or_trunc(256)?;
+                return Err(io::Error::new(
+                    io::ErrorKind::Other,
+                    format!("Error message in stream: {:?}",
+                            String::from_utf8_lossy(&message[..]))));
+            },
+        }
+    }
+
+    /// Reads the next element from the stream.
+    ///
+    /// This is lower-level than `next_field()`, since will return padding,
+    /// does not convert exceptions to errors, and distinguishes between
+    /// end-of-struct and end-of-document conditions.
+    ///
+    /// If the `eof()` flag is set, this returns `Element::EndOfDoc` without
+    /// reading anything.
+    ///
+    /// If this call returns `Element::EndOfDoc`, the `eof()` flag is
+    /// implicitly set.
+    pub fn next_element(&mut self)
+                        -> io::Result<Element<&mut Self>> {
+        self.next_element_impl(false)
+    }
+
+    /// `next_element`, except that it allows implicitly skipping padding.
+    ///
+    /// This workaround is due to the limitations of lexical lifetimes;
+    /// `next_field()` cannot loop over padding itself as the fact that it
+    /// sometimes returns in the loop extends the loop borrows to the end of
+    /// the function.
+    fn next_element_impl(&mut self, skip_padding: bool)
+                         -> io::Result<Element<&mut Self>> {
         if self.eof {
-            return Ok(None);
+            return Ok(Element::EndOfDoc);
         }
 
         self.skip_blob()?;
@@ -229,29 +291,30 @@ impl<'a, R : Input<'a>> Decoder<R> {
             let offset = self.pos;
             match wire::decode_descriptor(&mut self.input(true))?.parse() {
                 ParsedDescriptor::Pair(ty, tag) =>
-                    return Ok(Some(Field {
+                    return Ok(Element::Field(Field {
                         tag: tag,
                         pos: offset,
                         value: self.next_value(ty)?,
                     })),
 
                 ParsedDescriptor::Special(SpecialType::EndOfStruct) =>
-                    return Ok(None),
+                    return Ok(Element::EndOfStruct),
 
                 ParsedDescriptor::Special(SpecialType::EndOfDoc) => {
                     self.eof = true;
-                    return Ok(None);
+                    return Ok(Element::EndOfDoc);
                 },
 
-                ParsedDescriptor::Special(SpecialType::Error) => {
-                    let message = self.next_blob()?.get_or_trunc(256)?;
-                    return Err(io::Error::new(
-                        io::ErrorKind::Other,
-                        format!("Error message in stream: {}",
-                                String::from_utf8_lossy(&message[..]))));
-                },
+                ParsedDescriptor::Special(SpecialType::Exception) =>
+                    return Ok(Element::Exception(self.next_blob()?)),
 
-                ParsedDescriptor::Special(SpecialType::Padding) => { },
+                ParsedDescriptor::Special(SpecialType::Padding) => {
+                    if skip_padding {
+                        continue;
+                    } else {
+                        return Ok(Element::Padding);
+                    }
+                },
             }
         }
     }

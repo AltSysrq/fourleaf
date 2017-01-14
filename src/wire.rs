@@ -114,7 +114,7 @@ enum_from_primitive! {
 pub enum SpecialType {
     EndOfStruct = 0x00,
     EndOfDoc = 0x40,
-    Error = 0x80,
+    Exception = 0x80,
     Padding = 0xC0,
 }
 }
@@ -335,7 +335,7 @@ mod test {
 
         test!(0x00, ParsedDescriptor::Special(SpecialType::EndOfStruct));
         test!(0x40, ParsedDescriptor::Special(SpecialType::EndOfDoc));
-        test!(0x80, ParsedDescriptor::Special(SpecialType::Error));
+        test!(0x80, ParsedDescriptor::Special(SpecialType::Exception));
         test!(0xC0, ParsedDescriptor::Special(SpecialType::Padding));
         test!(0x01, ParsedDescriptor::Pair(DescriptorType::Null, 1));
         test!(0x41, ParsedDescriptor::Pair(DescriptorType::Integer, 1));
