@@ -7,7 +7,8 @@
 // option. This file may not be copied, modified, or distributed
 // except according to those terms.
 
-//! Functionality for decoding a fourleaf stream in terms of tag/value pairs.
+//! Functionality for encoding and decoding a fourleaf stream in terms of
+//! tag/value pairs.
 
 use std::cmp::min;
 use std::fmt;
@@ -82,12 +83,12 @@ impl<T> fmt::Debug for Nd<T> {
     }
 }
 
-/// Streaming fourleaf parser.
+/// Streaming fourleaf parser and encoder.
 ///
 /// The parser is built around pulling one tag/value pair at a time via
 /// `next_field()`. While it automatically handles the format of tag/value
 /// pairs and the special descriptors, it is unaware of the tree structure of
-/// the document. For example, it will happily parse an infinite stream of
+/// the document. For example, it will happily parse an infinite byte stream of
 /// `EndOfStruct` values.
 ///
 /// The reader used as input should be buffered if it is based on a heavyweight
@@ -96,12 +97,12 @@ impl<T> fmt::Debug for Nd<T> {
 ///
 /// The position of the underlying reader is always immediately after the last
 /// content read, unless any method call returns an `io::Error`, in which case
-/// the exact position is unspecified and continued use of the decoder will not
+/// the exact position is unspecified and continued use of the stream will not
 /// result in well-defined results.
 #[derive(Debug)]
-pub struct Decoder<R> {
-    input: R,
-    /// The current offset in `R` from where this decoder started.
+pub struct Stream<R> {
+    inner: R,
+    /// The current offset in `R` from where this stream started.
     pos: u64,
     /// Whether an `EndOfDoc` special descriptor was encountered.
     eof: bool,
@@ -112,7 +113,7 @@ pub struct Decoder<R> {
     graceful_eof: bool,
     /// Function to use to skip `n` bytes in `input`. Returns the actual number
     /// of bytes skipped.
-    skip: Nd<fn (input: &mut Decoder<R>, n: u64) -> io::Result<u64>>,
+    skip: Nd<fn (inner: &mut Stream<R>, n: u64) -> io::Result<u64>>,
 }
 
 /// An element decoded from a fourleaf stream.
@@ -163,7 +164,7 @@ pub enum Value<'d, R : 'd> {
     ///
     /// This should be handled by "recursing" into the appropriate code to
     /// handle the struct, and from there continuing to use `next_value` on the
-    /// `Decoder` until it returns `None` to indicate the end of the child
+    /// `Stream` until it returns `None` to indicate the end of the child
     /// struct.
     Struct,
 }
@@ -171,19 +172,19 @@ pub enum Value<'d, R : 'd> {
 /// A handle to a blob within the fourleaf stream.
 ///
 /// A `Blob` forwards `Read`, `Seek`, and `Write` implementations to the
-/// underlying input to the decoder, adapted to treat the `Blob` essentially as
+/// underlying input to the stream, adapted to treat the `Blob` essentially as
 /// a "file" of its own. Note that while one can make in-place writes to the
 /// `Blob`, you cannot do anything that would change its size, such as writing
 /// or seeking past the end.
 #[derive(Debug)]
 pub struct Blob<'d, R : 'd> {
-    decoder: &'d mut Decoder<R>,
+    stream: &'d mut Stream<R>,
     len: u64,
 }
 
 /// Check that advancing `pos` by `n` will not cause overflow.
 ///
-/// Generally, the inherent method on `Decoder` should be used, but in a few
+/// Generally, the inherent method on `Stream` should be used, but in a few
 /// cases the borrow checker cannot accept that, so this global function can
 /// be called instead.
 fn check_advance_pos(pos: u64, n: u64) -> io::Result<()> {
@@ -197,13 +198,13 @@ fn check_advance_pos(pos: u64, n: u64) -> io::Result<()> {
 }
 
 #[derive(Debug)]
-struct DecoderInput<'d, R : 'd>(&'d mut Decoder<R>, bool);
-impl<'d, R : Read> Read for DecoderInput<'d, R> {
+struct StreamTracker<'d, R : 'd>(&'d mut Stream<R>, bool);
+impl<'d, R : Read> Read for StreamTracker<'d, R> {
     fn read(&mut self, buf: &mut [u8]) -> io::Result<usize> {
         if buf.is_empty() { return Ok(0); }
         self.0.check_advance_pos(buf.len() as u64)?;
 
-        let n = self.0.input.read(buf)?;
+        let n = self.0.inner.read(buf)?;
         self.0.pos += n as u64;
 
         if 0 == n && self.1 {
@@ -214,35 +215,35 @@ impl<'d, R : Read> Read for DecoderInput<'d, R> {
         }
     }
 }
-impl<'d, R : BufRead> BufRead for DecoderInput<'d, R> {
+impl<'d, R : BufRead> BufRead for StreamTracker<'d, R> {
     fn fill_buf(&mut self) -> io::Result<&[u8]> {
         self.0.fill_buf_nb()
     }
 
     fn consume(&mut self, amt: usize) {
-        self.0.input.consume(amt);
+        self.0.inner.consume(amt);
         self.0.pos += amt as u64;
     }
 }
-impl<'d, W : Write> Write for DecoderInput<'d, W> {
+impl<'d, W : Write> Write for StreamTracker<'d, W> {
     fn write(&mut self, buf: &[u8]) -> io::Result<usize> {
         if buf.is_empty() { return Ok(0); }
         self.0.check_advance_pos(buf.len() as u64)?;
 
-        let n = self.0.input.write(buf)?;
+        let n = self.0.inner.write(buf)?;
         self.0.pos += n as u64;
         Ok(n)
     }
 
     fn flush(&mut self) -> io::Result<()> {
-        self.0.input.flush()
+        self.0.inner.flush()
     }
 }
 
-impl<R> Decoder<R> {
-    fn input<'d>(&'d mut self, graceful_eof: bool) -> DecoderInput<'d, R> {
+impl<R> Stream<R> {
+    fn track<'d>(&'d mut self, graceful_eof: bool) -> StreamTracker<'d, R> {
         let graceful_eof = graceful_eof && self.graceful_eof;
-        DecoderInput(self, graceful_eof)
+        StreamTracker(self, graceful_eof)
     }
 
     fn check_advance_pos(&self, n: u64) -> io::Result<()> {
@@ -250,26 +251,26 @@ impl<R> Decoder<R> {
     }
 }
 
-impl<T : AsRef<[u8]>> Decoder<TransparentCursor<T>> {
-    /// Create a new decoder which decodes the given slice.
+impl<T : AsRef<[u8]>> Stream<TransparentCursor<T>> {
+    /// Create a new stream which decodes the given slice.
     pub fn from_slice(t: T) -> Self {
         Self::new_seek(TransparentCursor(io::Cursor::new(t)))
     }
 }
 
-impl<R : Read> Decoder<R> {
-    /// Create a new decoder starting from byte offset 0.
-    pub fn new(input: R) -> Self {
-        Self::new_at(input, 0)
+impl<R : Read> Stream<R> {
+    /// Create a new stream starting from byte offset 0.
+    pub fn new(inner: R) -> Self {
+        Self::new_at(inner, 0)
     }
 
-    /// Create a new decoder with the byte offset starting at the given value.
+    /// Create a new stream with the byte offset starting at the given value.
     ///
-    /// Note that `offset` does not cause `input` to be seeked; rather, it
+    /// Note that `offset` does not cause `inner` to be seeked; rather, it
     /// simply sets the initial value for byte offset tracking.
-    pub fn new_at(input: R, offset: u64) -> Self {
-        Decoder {
-            input: input,
+    pub fn new_at(inner: R, offset: u64) -> Self {
+        Stream {
+            inner: inner,
             pos: offset,
             eof: false,
             blob_end: 0,
@@ -278,25 +279,25 @@ impl<R : Read> Decoder<R> {
         }
     }
 
-    /// Like `new()`, but if the decoder needs to skip a blob, it will use
+    /// Like `new()`, but if the stream needs to skip a blob, it will use
     /// `seek()` instead of reading and discarding data.
     ///
     /// Once specialisation becomes stable, this method will likely be
     /// deprecated as detecting to use `seek()` will be determined
     /// automatically.
-    pub fn new_seek(input: R) -> Self where R : Seek {
-        Self::new_seek_at(input, 0)
+    pub fn new_seek(inner: R) -> Self where R : Seek {
+        Self::new_seek_at(inner, 0)
     }
 
-    /// Like `new_at()`, but if the decoder needs to skip a blob, it will use
+    /// Like `new_at()`, but if the stream needs to skip a blob, it will use
     /// `seek()` instead of reading and discarding data.
     ///
     /// Once specialisation becomes stable, this method will likely be
     /// deprecated as detecting to use `seek()` will be determined
     /// automatically.
-    pub fn new_seek_at(input: R, offset: u64) -> Self where R : Seek {
-        Decoder {
-            input: input,
+    pub fn new_seek_at(inner: R, offset: u64) -> Self where R : Seek {
+        Stream {
+            inner: inner,
             pos: offset,
             eof: false,
             blob_end: 0,
@@ -306,7 +307,7 @@ impl<R : Read> Decoder<R> {
     }
 
     fn skip_by_discard(&mut self, n: u64) -> io::Result<u64> {
-        io::copy(&mut self.input(false).take(n), &mut io::sink())
+        io::copy(&mut self.track(false).take(n), &mut io::sink())
     }
 
     fn skip_by_seek(&mut self, n: u64) -> io::Result<u64> where R : Seek {
@@ -323,7 +324,7 @@ impl<R : Read> Decoder<R> {
         } else {
             // Otherwise, try to seek directly.
             self.check_advance_pos(n)?;
-            if self.input.seek(io::SeekFrom::Current(n as i64)).is_ok() {
+            if self.inner.seek(io::SeekFrom::Current(n as i64)).is_ok() {
                 self.pos += n;
                 Ok(n)
             } else {
@@ -334,32 +335,34 @@ impl<R : Read> Decoder<R> {
         }
     }
 
-    /// Consumes this `Decoder` and returns the underlying input.
+    /// Consumes this `Stream` and returns the underlying byte stream.
     pub fn into_inner(self) -> R {
-        self.input
+        self.inner
     }
 
-    /// Returns the current byte offset of the decoder.
+    /// Returns the current byte offset of the stream.
     pub fn pos(&self) -> u64 {
         self.pos
     }
 
-    /// Changes the decoder's current conception of the position in the stream.
+    /// Changes the stream's current conception of the position in the byte
+    /// stream.
     ///
-    /// This should only be used if some operation outside the decoder's
-    /// control caused the position of the stream to actually change, as the
-    /// decoder will assume that other positions it maintains are still valid.
+    /// This should only be used if some operation outside the stream's
+    /// control caused the position of the byte stream to actually change, as
+    /// the stream will assume that other positions it maintains are still
+    /// valid.
     ///
-    /// To change the _logical_ position in the stream, use `reset_pos()`
+    /// To change the _logical_ position in the byte stream, use `reset_pos()`
     /// instead.
     pub fn set_pos(&mut self, pos: u64) {
         self.pos = pos;
     }
 
-    /// Alters what this decoder considers to be the logical position in the
-    /// stream.
+    /// Alters what this stream considers to be the logical position in the
+    /// byte stream.
     ///
-    /// This will cause the decoder to flush any operations depending on the
+    /// This will cause the stream to flush any operations depending on the
     /// current position, and so can encounter IO errors.
     pub fn reset_pos(&mut self, pos: u64) -> io::Result<()> {
         self.skip_blob()?;
@@ -376,7 +379,7 @@ impl<R : Read> Decoder<R> {
     }
 
     /// Clears the EOF flag if it had been set by an `EndOfDoc` descriptor,
-    /// allowing the decoder to continue with whatever follows.
+    /// allowing the stream to continue with whatever follows.
     pub fn clear_eof(&mut self) {
         self.eof = false;
     }
@@ -392,7 +395,7 @@ impl<R : Read> Decoder<R> {
     /// gracefully.
     ///
     /// If true, if an EOF is encountered when reading a descriptor (i.e., the
-    /// start of a field), the decoder acts as if it had encountered an
+    /// start of a field), the stream acts as if it had encountered an
     /// explicit `EndOfDoc` descriptor and returns `None` from `next_field()`
     /// and sets the EOF flag.
     ///
@@ -472,7 +475,7 @@ impl<R : Read> Decoder<R> {
 
         loop {
             let offset = self.pos;
-            match wire::decode_descriptor(&mut self.input(true))?.parse() {
+            match wire::decode_descriptor(&mut self.track(true))?.parse() {
                 ParsedDescriptor::Pair(ty, tag) =>
                     return Ok(Element::Field(Field {
                         tag: tag,
@@ -507,19 +510,19 @@ impl<R : Read> Decoder<R> {
         Ok(match ty {
             DescriptorType::Null => Value::Null,
             DescriptorType::Integer => Value::Integer(
-                wire::decode_u64(&mut self.input(false))?),
+                wire::decode_u64(&mut self.track(false))?),
             DescriptorType::Blob => Value::Blob(self.next_blob()?),
             DescriptorType::Struct => Value::Struct,
         })
     }
 
     fn next_blob(&mut self) -> io::Result<Blob<R>> {
-        let len = wire::decode_u64(&mut self.input(false))?;
+        let len = wire::decode_u64(&mut self.track(false))?;
         self.check_advance_pos(len)?;
 
         self.blob_end = self.pos + len;
         Ok(Blob {
-            decoder: self,
+            stream: self,
             len: len,
         })
     }
@@ -538,11 +541,11 @@ impl<R : Read> Decoder<R> {
     }
 }
 
-impl<R : BufRead> Decoder<R> {
+impl<R : BufRead> Stream<R> {
     /// Like `BufRead::fill_buf()`. Exists here so that `Blob` can get a slice
     /// with the appropriate lifetime.
     fn fill_buf_nb(&mut self) -> io::Result<&[u8]> {
-        let ret = self.input.fill_buf()?;
+        let ret = self.inner.fill_buf()?;
         check_advance_pos(self.pos, ret.len() as u64)?;
         Ok(ret)
     }
@@ -556,23 +559,23 @@ impl<'d, R : 'd> Blob<'d, R> {
 
     /// Returns the number of unconsumed bytes in this blob.
     pub fn remaining(&self) -> u64 {
-        self.decoder.blob_end - self.decoder.pos
+        self.stream.blob_end - self.stream.pos
     }
 
-    /// Returns the current byte offset of the decoder.
-    pub fn decoder_pos(&self) -> u64 {
-        self.decoder.pos
+    /// Returns the current byte offset of the stream.
+    pub fn stream_pos(&self) -> u64 {
+        self.stream.pos
     }
 
     /// Returns the byte offset of the first byte in this blob (regardless of
     /// how much of the blob has been consumed).
     pub fn start_pos(&self) -> u64 {
-        self.decoder.blob_end - self.len
+        self.stream.blob_end - self.len
     }
 
     /// Returns the byte offset one past the last byte in this blob.
     pub fn end_pos(&self) -> u64 {
-        self.decoder.blob_end
+        self.stream.blob_end
     }
 
     /// Returns the current byte offset into this blob; i.e., the number of
@@ -630,9 +633,9 @@ impl<'d, R : AsRef<[u8]> + 'd> Blob<'d, R> {
     /// underlying slice.
     pub fn slice(&self) -> Option<&[u8]> {
         let rem = self.remaining();
-        let input = self.decoder.input.as_ref();
-        if rem <= (input.len() as u64) {
-            Some(&input[..(rem as usize)])
+        let inner = self.stream.inner.as_ref();
+        if rem <= (inner.len() as u64) {
+            Some(&inner[..(rem as usize)])
         } else {
             None
         }
@@ -649,9 +652,9 @@ impl<'d, R : AsMut<[u8]> + 'd> Blob<'d, R> {
     /// it).
     pub fn slice_mut(&mut self) -> Option<&mut [u8]> {
         let rem = self.remaining();
-        let input = self.decoder.input.as_mut();
-        if rem <= (input.len() as u64) {
-            Some(&mut input[..(rem as usize)])
+        let inner = self.stream.inner.as_mut();
+        if rem <= (inner.len() as u64) {
+            Some(&mut inner[..(rem as usize)])
         } else {
             None
         }
@@ -672,7 +675,7 @@ impl<'d, R : Read + 'd> Read for Blob<'d, R> {
             buf
         };
 
-        let n = self.decoder.input(false).read(buf)?;
+        let n = self.stream.track(false).read(buf)?;
         Ok(n)
     }
 }
@@ -680,12 +683,12 @@ impl<'d, R : Read + 'd> Read for Blob<'d, R> {
 impl<'d, R : BufRead + 'd> BufRead for Blob<'d, R> {
     fn fill_buf(&mut self) -> io::Result<&[u8]> {
         let avail = min(usize::MAX as u64, self.remaining()) as usize;
-        let ret = self.decoder.fill_buf_nb()?;
+        let ret = self.stream.fill_buf_nb()?;
         Ok(&ret[..min(avail, ret.len())])
     }
     fn consume(&mut self, amt: usize) {
         debug_assert!((amt as u64) <= self.remaining());
-        self.decoder.input(false).consume(amt)
+        self.stream.track(false).consume(amt)
     }
 }
 
@@ -694,11 +697,11 @@ impl<'d, W : Write + 'd> Write for Blob<'d, W> {
         let avail = min(buf.len(),
                         min(self.remaining(), usize::MAX as u64) as usize);
 
-        self.decoder.input(false).write(&buf[..avail])
+        self.stream.track(false).write(&buf[..avail])
     }
 
     fn flush(&mut self) -> io::Result<()> {
-        self.decoder.input(false).flush()
+        self.stream.track(false).flush()
     }
 }
 
@@ -727,35 +730,35 @@ impl<'d, R : Seek + 'd> Seek for Blob<'d, R> {
                 if off < 0 {
                     let off = (-off) as u64;
                     check!(off <= self.inner_pos());
-                    self.decoder_pos() - off
+                    self.stream_pos() - off
                 } else {
                     let off = off as u64;
                     check!(off <= self.remaining());
-                    self.decoder_pos() + off
+                    self.stream_pos() + off
                 }
             },
         };
 
-        if pos < self.decoder_pos() {
-            let displacement = self.decoder_pos() - pos;
+        if pos < self.stream_pos() {
+            let displacement = self.stream_pos() - pos;
             if displacement > (i64::MAX as u64) {
                 return Err(io::Error::new(
                     io::ErrorKind::Other,
                     "Cannot seek blob by >= 8 EB at a time"));
             }
-            self.decoder.input.seek(
+            self.stream.inner.seek(
                 io::SeekFrom::Current(-(displacement as i64)))?;
-            self.decoder.pos -= displacement;
+            self.stream.pos -= displacement;
         } else {
-            let displacement = pos - self.decoder_pos();
+            let displacement = pos - self.stream_pos();
             if displacement > (i64::MAX as u64) {
                 return Err(io::Error::new(
                     io::ErrorKind::Other,
                     "Cannot seek blob by >= 8 EB at a time"));
             }
-            self.decoder.input.seek(
+            self.stream.inner.seek(
                 io::SeekFrom::Current(displacement as i64))?;
-            self.decoder.pos += displacement;
+            self.stream.pos += displacement;
         }
 
         Ok(self.inner_pos())
@@ -900,13 +903,13 @@ mod test {
         data
     }
 
-    fn decoder(text: &str) -> Decoder<io::Cursor<Vec<u8>>> {
-        Decoder::new(io::Cursor::new(parse(text)))
+    fn stream(text: &str) -> Stream<io::Cursor<Vec<u8>>> {
+        Stream::new(io::Cursor::new(parse(text)))
     }
 
     #[test]
     fn simple() {
-        let mut dec = decoder("01 00");
+        let mut dec = stream("01 00");
         {
             let field = dec.next_field().unwrap().unwrap();
             assert_eq!(1, field.tag);
@@ -939,7 +942,7 @@ mod test {
             } }
         }
 
-        let mut dec = decoder("41 00 42 01 43 80 01 00");
+        let mut dec = stream("41 00 42 01 43 80 01 00");
         {
             let field = dec.next_field().unwrap().unwrap();
             assert_eq!(1, field.tag);
@@ -964,7 +967,7 @@ mod test {
 
     #[test]
     fn read_whole_blob() {
-        let mut dec = decoder("81 0B 'hello world' 00");
+        let mut dec = stream("81 0B 'hello world' 00");
         {
             let mut field = dec.next_field().unwrap().unwrap();
             assert_eq!(1, field.tag);
@@ -974,7 +977,7 @@ mod test {
             assert_eq!(11, blob.remaining());
             assert_eq!(2, blob.start_pos());
             assert_eq!(13, blob.end_pos());
-            assert_eq!(2, blob.decoder_pos());
+            assert_eq!(2, blob.stream_pos());
             assert_eq!(0, blob.inner_pos());
 
             let data = blob.read_fully(65536).unwrap();
@@ -984,7 +987,7 @@ mod test {
             assert_eq!(0, blob.remaining());
             assert_eq!(2, blob.start_pos());
             assert_eq!(13, blob.end_pos());
-            assert_eq!(13, blob.decoder_pos());
+            assert_eq!(13, blob.stream_pos());
             assert_eq!(11, blob.inner_pos());
         }
 
@@ -993,7 +996,7 @@ mod test {
 
     #[test]
     fn read_partial_blob() {
-        let mut dec = decoder("81 0B 'hello world' 02 00");
+        let mut dec = stream("81 0B 'hello world' 02 00");
 
         {
             let mut field = dec.next_field().unwrap().unwrap();
@@ -1006,7 +1009,7 @@ mod test {
             assert_eq!(7, blob.remaining());
             assert_eq!(2, blob.start_pos());
             assert_eq!(13, blob.end_pos());
-            assert_eq!(6, blob.decoder_pos());
+            assert_eq!(6, blob.stream_pos());
             assert_eq!(4, blob.inner_pos());
 
             let mut buf = [0u8;5];
@@ -1017,7 +1020,7 @@ mod test {
             assert_eq!(2, blob.remaining());
             assert_eq!(2, blob.start_pos());
             assert_eq!(13, blob.end_pos());
-            assert_eq!(11, blob.decoder_pos());
+            assert_eq!(11, blob.stream_pos());
             assert_eq!(9, blob.inner_pos());
 
             // Drop the blob without fully consuming it
@@ -1035,7 +1038,7 @@ mod test {
 
     #[test]
     fn get_oversized_blob_fails() {
-        let mut dec = decoder("81 FFFFFF00");
+        let mut dec = stream("81 FFFFFF00");
 
         {
             let mut field = dec.next_field().unwrap().unwrap();
@@ -1047,7 +1050,7 @@ mod test {
 
     #[test]
     fn read_nested_struct() {
-        let mut dec = decoder("C1 C2 00 C3 00 00");
+        let mut dec = stream("C1 C2 00 C3 00 00");
 
         {
             let field = dec.next_field().unwrap().unwrap();
@@ -1074,7 +1077,7 @@ mod test {
 
     #[test]
     fn read_explicit_eof() {
-        let mut dec = decoder("C1 40 02");
+        let mut dec = stream("C1 40 02");
 
         {
             let field = dec.next_field().unwrap().unwrap();
@@ -1097,7 +1100,7 @@ mod test {
 
     #[test]
     fn graceless_eof() {
-        let mut dec = decoder("01");
+        let mut dec = stream("01");
         assert!(!dec.graceful_eof());
         {
             let field = dec.next_field().unwrap().unwrap();
@@ -1112,7 +1115,7 @@ mod test {
 
     #[test]
     fn graceful_eof() {
-        let mut dec = decoder("01");
+        let mut dec = stream("01");
         dec.set_graceful_eof(true);
         assert!(dec.graceful_eof());
         {
@@ -1127,7 +1130,7 @@ mod test {
 
     #[test]
     fn padding_skipped() {
-        let mut dec = decoder("01 C0 C0 C0 02");
+        let mut dec = stream("01 C0 C0 C0 02");
         {
             let field = dec.next_field().unwrap().unwrap();
             assert_eq!(1, field.tag);
@@ -1144,7 +1147,7 @@ mod test {
 
     #[test]
     fn read_inband_error() {
-        let mut dec = decoder("80 05 'plugh' 01");
+        let mut dec = stream("80 05 'plugh' 01");
 
         match dec.next_field() {
             Ok(f) => panic!("next_field succeeded unexpectedly: {:?}", f),
@@ -1164,21 +1167,21 @@ mod test {
 
     #[test]
     fn read_overflow_detected() {
-        let mut dec = decoder("41 ff ff ff ff ff 00 00");
+        let mut dec = stream("41 ff ff ff ff ff 00 00");
         dec.reset_pos(0xFFFFFFFFFFFFFFFA).unwrap();
         assert!(dec.next_field().is_err());
     }
 
     #[test]
     fn blob_access_overflow_detected() {
-        let mut dec = decoder("81 05 'plugh' 00");
+        let mut dec = stream("81 05 'plugh' 00");
         dec.reset_pos(0xFFFFFFFFFFFFFFFA).unwrap();
         assert!(dec.next_field().is_err());
     }
 
     #[test]
     fn reset_pos_skips_unconsumed_blob() {
-        let mut dec = decoder("81 05 'plugh' 02 00");
+        let mut dec = stream("81 05 'plugh' 02 00");
         {
             let mut field = dec.next_field().unwrap().unwrap();
             assert_eq!(1, field.tag);
@@ -1196,7 +1199,7 @@ mod test {
 
     #[test]
     fn blob_seek() {
-        let mut dec = decoder("81 0B 'hello world' 02");
+        let mut dec = stream("81 0B 'hello world' 02");
         {
             let mut field = dec.next_field().unwrap().unwrap();
             assert_eq!(1, field.tag);
@@ -1206,27 +1209,27 @@ mod test {
             assert_eq!(11, blob.remaining());
             assert_eq!(0, blob.inner_pos());
             assert_eq!(2, blob.start_pos());
-            assert_eq!(2, blob.decoder_pos());
+            assert_eq!(2, blob.stream_pos());
 
             blob.seek(io::SeekFrom::Current(3)).unwrap();
             assert_eq!(11, blob.len());
             assert_eq!(8, blob.remaining());
             assert_eq!(3, blob.inner_pos());
-            assert_eq!(5, blob.decoder_pos());
+            assert_eq!(5, blob.stream_pos());
             assert_eq!(b"lo world", &blob.read_fully(256).unwrap()[..]);
 
             blob.seek(io::SeekFrom::Start(6)).unwrap();
             assert_eq!(11, blob.len());
             assert_eq!(5, blob.remaining());
             assert_eq!(6, blob.inner_pos());
-            assert_eq!(8, blob.decoder_pos());
+            assert_eq!(8, blob.stream_pos());
             assert_eq!(b"world", &blob.read_fully(256).unwrap()[..]);
 
             blob.seek(io::SeekFrom::Current(-3)).unwrap();
             assert_eq!(11, blob.len());
             assert_eq!(3, blob.remaining());
             assert_eq!(8, blob.inner_pos());
-            assert_eq!(10, blob.decoder_pos());
+            assert_eq!(10, blob.stream_pos());
             assert_eq!(b"rld", &blob.read_fully(256).unwrap()[..]);
 
             blob.seek(io::SeekFrom::Start(3)).unwrap();
@@ -1266,7 +1269,7 @@ mod test {
 
     #[test]
     fn blob_rewrite() {
-        let mut dec = decoder("81 0B 'hello world' 02");
+        let mut dec = stream("81 0B 'hello world' 02");
         {
             let mut field = dec.next_field().unwrap().unwrap();
             assert_eq!(1, field.tag);
@@ -1291,7 +1294,7 @@ mod test {
     fn blob_slicing() {
         let mut data = parse("81 0B 'hello world' 02");
         {
-            let mut dec = Decoder::from_slice(&mut data[..]);
+            let mut dec = Stream::from_slice(&mut data[..]);
 
             {
                 let mut field = dec.next_field().unwrap().unwrap();
@@ -1322,7 +1325,7 @@ mod test {
     #[test]
     fn blob_slice_oob() {
         let mut data = parse("81 0B 'plugh'");
-        let mut dec = Decoder::from_slice(&mut data[..]);
+        let mut dec = Stream::from_slice(&mut data[..]);
         {
             let mut field = dec.next_field().unwrap().unwrap();
             assert_eq!(1, field.tag);
@@ -1335,7 +1338,7 @@ mod test {
 
     #[test]
     fn blob_bufread() {
-        let mut dec = decoder("81 0B 'hello world' 02");
+        let mut dec = stream("81 0B 'hello world' 02");
         {
             let mut field = dec.next_field().unwrap().unwrap();
             assert_eq!(1, field.tag);
@@ -1344,7 +1347,7 @@ mod test {
             assert_eq!(b"hello world", blob.fill_buf().unwrap());
             blob.consume(6);
             assert_eq!(6, blob.inner_pos());
-            assert_eq!(8, blob.decoder_pos());
+            assert_eq!(8, blob.stream_pos());
             assert_eq!(5, blob.remaining());
 
             assert_eq!(b"world", blob.fill_buf().unwrap());
