@@ -10,10 +10,62 @@
 //! Functionality for decoding a fourleaf stream in terms of tag/value pairs.
 
 use std::cmp::min;
-use std::io::{self, Read, Seek, Write};
+use std::io::{self, BufRead, Read, Seek, Write};
 use std::{i8, u8, i16, u16, i32, u32, i64, u64, isize, usize};
 
 use wire::{self, DescriptorType, ParsedDescriptor, SpecialType};
+
+/// A simple wrapper around `io::Cursor` which exposes `AsRef<[u8]>` and
+/// `AsMut<[u8]>` for use with `Blob::slice()` and `Blob::slice_mut()`.
+///
+/// Note that the `AsRef` and `AsMut` implementations return the *unconsumed*
+/// portion of the slice rather than the whole thing.
+#[derive(Debug, Clone)]
+pub struct TransparentCursor<T>(#[allow(missing_docs)] pub io::Cursor<T>);
+impl<T : AsRef<[u8]>> Read for TransparentCursor<T> {
+    #[inline]
+    fn read(&mut self, buf: &mut [u8]) -> io::Result<usize> {
+        self.0.read(buf)
+    }
+}
+
+impl<T : AsRef<[u8]>> BufRead for TransparentCursor<T> {
+    #[inline]
+    fn fill_buf(&mut self) -> io::Result<&[u8]> {
+        self.0.fill_buf()
+    }
+    #[inline]
+    fn consume(&mut self, amt: usize) {
+        self.0.consume(amt)
+    }
+}
+
+impl<T> Write for TransparentCursor<T> where io::Cursor<T> : Write {
+    #[inline]
+    fn write(&mut self, buf: &[u8]) -> io::Result<usize> {
+        self.0.write(buf)
+    }
+    #[inline]
+    fn flush(&mut self) -> io::Result<()> {
+        self.0.flush()
+    }
+}
+
+impl<T : AsRef<[u8]>> AsRef<[u8]> for TransparentCursor<T> {
+    #[inline]
+    fn as_ref(&self) -> &[u8] {
+        let pos = self.0.position() as usize;
+        &self.0.get_ref().as_ref()[pos..]
+    }
+}
+
+impl<T : AsMut<[u8]>> AsMut<[u8]> for TransparentCursor<T> {
+    #[inline]
+    fn as_mut(&mut self) -> &mut [u8] {
+        let pos = self.0.position() as usize;
+        &mut self.0.get_mut().as_mut()[pos..]
+    }
+}
 
 /// Streaming fourleaf parser.
 ///
@@ -161,6 +213,13 @@ impl<R> Decoder<R> {
     }
 }
 
+impl<T : AsRef<[u8]>> Decoder<TransparentCursor<T>> {
+    /// Create a new decoder which decodes the given slice.
+    pub fn from_slice(t: T) -> Self {
+        Self::new(TransparentCursor(io::Cursor::new(t)))
+    }
+}
+
 impl<R : Read> Decoder<R> {
     /// Create a new decoder starting from byte offset 0.
     pub fn new(input: R) -> Self {
@@ -189,6 +248,30 @@ impl<R : Read> Decoder<R> {
     /// Returns the current byte offset of the decoder.
     pub fn pos(&self) -> u64 {
         self.pos
+    }
+
+    /// Changes the decoder's current conception of the position in the stream.
+    ///
+    /// This should only be used if some operation outside the decoder's
+    /// control caused the position of the stream to actually change, as the
+    /// decoder will assume that other positions it maintains are still valid.
+    ///
+    /// To change the _logical_ position in the stream, use `reset_pos()`
+    /// instead.
+    pub fn set_pos(&mut self, pos: u64) {
+        self.pos = pos;
+    }
+
+    /// Alters what this decoder considers to be the logical position in the
+    /// stream.
+    ///
+    /// This will cause the decoder to flush any operations depending on the
+    /// current position, and so can encounter IO errors.
+    pub fn reset_pos(&mut self, pos: u64) -> io::Result<()> {
+        self.skip_blob()?;
+        self.blob_end = 0;
+        self.pos = pos;
+        Ok(())
     }
 
     /// Returns whether an `EndOfDoc` descriptor has been encountered.
@@ -541,7 +624,7 @@ impl<'d, R : Seek + 'd> Seek for Blob<'d, R> {
 
         if pos < self.decoder_pos() {
             let displacement = self.decoder_pos() - pos;
-            if pos > (i64::MAX as u64) {
+            if displacement > (i64::MAX as u64) {
                 return Err(io::Error::new(
                     io::ErrorKind::Other,
                     "Cannot seek blob by >= 8 EB at a time"));
@@ -551,7 +634,7 @@ impl<'d, R : Seek + 'd> Seek for Blob<'d, R> {
             self.decoder.pos -= displacement;
         } else {
             let displacement = pos - self.decoder_pos();
-            if pos > (i64::MAX as u64) {
+            if displacement > (i64::MAX as u64) {
                 return Err(io::Error::new(
                     io::ErrorKind::Other,
                     "Cannot seek blob by >= 8 EB at a time"));
@@ -659,7 +742,7 @@ impl<'d, R : 'd> Value<'d, R> {
 
 #[cfg(test)]
 mod test {
-    use std::io::{self, Read};
+    use std::io::{self, Read, Seek, Write};
     use std::str;
 
     use super::*;
@@ -962,6 +1045,177 @@ mod test {
             assert_eq!(1, field.tag);
             assert_eq!(7, field.pos);
             field.value.to_null().unwrap();
+        }
+    }
+
+    #[test]
+    fn read_overflow_detected() {
+        let mut dec = decoder("41 ff ff ff ff ff 00 00");
+        dec.reset_pos(0xFFFFFFFFFFFFFFFA).unwrap();
+        assert!(dec.next_field().is_err());
+    }
+
+    #[test]
+    fn blob_access_overflow_detected() {
+        let mut dec = decoder("81 05 'plugh' 00");
+        dec.reset_pos(0xFFFFFFFFFFFFFFFA).unwrap();
+        assert!(dec.next_field().is_err());
+    }
+
+    #[test]
+    fn reset_pos_skips_unconsumed_blob() {
+        let mut dec = decoder("81 05 'plugh' 02 00");
+        {
+            let mut field = dec.next_field().unwrap().unwrap();
+            assert_eq!(1, field.tag);
+            field.value.to_blob().unwrap();
+        }
+
+        dec.reset_pos(0).unwrap();
+        {
+            let field = dec.next_field().unwrap().unwrap();
+            assert_eq!(2, field.tag);
+            field.value.to_null().unwrap();
+            assert_eq!(0, field.pos);
+        }
+    }
+
+    #[test]
+    fn blob_seek() {
+        let mut dec = decoder("81 0B 'hello world' 02");
+        {
+            let mut field = dec.next_field().unwrap().unwrap();
+            assert_eq!(1, field.tag);
+            let blob = field.value.to_blob().unwrap();
+
+            assert_eq!(11, blob.len());
+            assert_eq!(11, blob.remaining());
+            assert_eq!(0, blob.inner_pos());
+            assert_eq!(2, blob.start_pos());
+            assert_eq!(2, blob.decoder_pos());
+
+            blob.seek(io::SeekFrom::Current(3)).unwrap();
+            assert_eq!(11, blob.len());
+            assert_eq!(8, blob.remaining());
+            assert_eq!(3, blob.inner_pos());
+            assert_eq!(5, blob.decoder_pos());
+            assert_eq!(b"lo world", &blob.read_fully(256).unwrap()[..]);
+
+            blob.seek(io::SeekFrom::Start(6)).unwrap();
+            assert_eq!(11, blob.len());
+            assert_eq!(5, blob.remaining());
+            assert_eq!(6, blob.inner_pos());
+            assert_eq!(8, blob.decoder_pos());
+            assert_eq!(b"world", &blob.read_fully(256).unwrap()[..]);
+
+            blob.seek(io::SeekFrom::Current(-3)).unwrap();
+            assert_eq!(11, blob.len());
+            assert_eq!(3, blob.remaining());
+            assert_eq!(8, blob.inner_pos());
+            assert_eq!(10, blob.decoder_pos());
+            assert_eq!(b"rld", &blob.read_fully(256).unwrap()[..]);
+
+            blob.seek(io::SeekFrom::Start(3)).unwrap();
+
+            assert!(blob.seek(io::SeekFrom::Start(12)).is_err());
+            assert!(blob.seek(io::SeekFrom::Current(-4)).is_err());
+            assert!(blob.seek(io::SeekFrom::Current(9)).is_err());
+            assert!(blob.seek(io::SeekFrom::End(-12)).is_err());
+            assert!(blob.seek(io::SeekFrom::End(1)).is_err());
+
+            blob.seek(io::SeekFrom::Start(0)).unwrap();
+            assert_eq!(11, blob.remaining());
+            blob.seek(io::SeekFrom::Start(11)).unwrap();
+            assert_eq!(0, blob.remaining());
+            blob.seek(io::SeekFrom::End(-11)).unwrap();
+            assert_eq!(11, blob.remaining());
+            blob.seek(io::SeekFrom::End(0)).unwrap();
+            assert_eq!(0, blob.remaining());
+            blob.seek(io::SeekFrom::Start(5)).unwrap();
+            blob.seek(io::SeekFrom::Current(-5)).unwrap();
+            assert_eq!(11, blob.remaining());
+            blob.seek(io::SeekFrom::End(-5)).unwrap();
+            blob.seek(io::SeekFrom::Current(5)).unwrap();
+            assert_eq!(0, blob.remaining());
+
+            blob.seek(io::SeekFrom::Start(5)).unwrap();
+            // Don't consume
+        }
+
+        {
+            let field = dec.next_field().unwrap().unwrap();
+            assert_eq!(2, field.tag);
+            assert_eq!(13, field.pos);
+            field.value.to_null().unwrap();
+        }
+    }
+
+    #[test]
+    fn blob_rewrite() {
+        let mut dec = decoder("81 0B 'hello world' 02");
+        {
+            let mut field = dec.next_field().unwrap().unwrap();
+            assert_eq!(1, field.tag);
+            let blob = field.value.to_blob().unwrap();
+
+            blob.seek(io::SeekFrom::Start(6)).unwrap();
+            assert_eq!(5, blob.write(b"minnasama").unwrap());
+
+            blob.seek(io::SeekFrom::Start(0)).unwrap();
+            assert_eq!(b"hello minna", &blob.read_fully(256).unwrap()[..]);
+        }
+
+        {
+            let field = dec.next_field().unwrap().unwrap();
+            assert_eq!(2, field.tag);
+            assert_eq!(13, field.pos);
+            field.value.to_null().unwrap();
+        }
+    }
+
+    #[test]
+    fn blob_slicing() {
+        let mut data = parse("81 0B 'hello world' 02");
+        {
+            let mut dec = Decoder::from_slice(&mut data[..]);
+
+            {
+                let mut field = dec.next_field().unwrap().unwrap();
+                assert_eq!(1, field.tag);
+                let blob = field.value.to_blob().unwrap();
+
+                assert_eq!(b"hello world", blob.slice().unwrap());
+                assert_eq!(b"hello world", blob.slice_mut().unwrap());
+
+                assert_eq!(b"hello ", &blob.read_or_trunc(6).unwrap()[..]);
+                assert_eq!(b"world", blob.slice().unwrap());
+                blob.slice_mut().unwrap()[0] = b'W';
+                assert_eq!(b"World", blob.slice().unwrap());
+            }
+
+            {
+                let field = dec.next_field().unwrap().unwrap();
+                assert_eq!(2, field.tag);
+                assert_eq!(13, field.pos);
+                field.value.to_null().unwrap();
+            }
+        }
+
+        let data2 = parse("81 0B 'hello World' 02");
+        assert_eq!(data, data2);
+    }
+
+    #[test]
+    fn blob_slice_oob() {
+        let mut data = parse("81 0B 'plugh'");
+        let mut dec = Decoder::from_slice(&mut data[..]);
+        {
+            let mut field = dec.next_field().unwrap().unwrap();
+            assert_eq!(1, field.tag);
+            let blob = field.value.to_blob().unwrap();
+            assert_eq!(11, blob.len());
+            assert!(blob.slice().is_none());
+            assert!(blob.slice_mut().is_none());
         }
     }
 }
