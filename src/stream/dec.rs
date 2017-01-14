@@ -10,6 +10,7 @@
 //! Functionality for decoding a fourleaf stream in terms of tag/value pairs.
 
 use std::cmp::min;
+use std::fmt;
 use std::io::{self, BufRead, Read, Seek, Write};
 use std::{i8, u8, i16, u16, i32, u32, i64, u64, isize, usize};
 
@@ -51,6 +52,12 @@ impl<T> Write for TransparentCursor<T> where io::Cursor<T> : Write {
     }
 }
 
+impl<T : AsRef<[u8]>> Seek for TransparentCursor<T> {
+    fn seek(&mut self, whence: io::SeekFrom) -> io::Result<u64> {
+        self.0.seek(whence)
+    }
+}
+
 impl<T : AsRef<[u8]>> AsRef<[u8]> for TransparentCursor<T> {
     #[inline]
     fn as_ref(&self) -> &[u8] {
@@ -64,6 +71,14 @@ impl<T : AsMut<[u8]>> AsMut<[u8]> for TransparentCursor<T> {
     fn as_mut(&mut self) -> &mut [u8] {
         let pos = self.0.position() as usize;
         &mut self.0.get_mut().as_mut()[pos..]
+    }
+}
+
+#[derive(Clone, Copy)]
+struct Nd<T>(T);
+impl<T> fmt::Debug for Nd<T> {
+    fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
+        write!(f, "<?>")
     }
 }
 
@@ -95,6 +110,9 @@ pub struct Decoder<R> {
     /// Whether an EOF from the underlying input should be translated to an
     /// `EndOfDoc` descriptor.
     graceful_eof: bool,
+    /// Function to use to skip `n` bytes in `input`. Returns the actual number
+    /// of bytes skipped.
+    skip: Nd<fn (input: &mut Decoder<R>, n: u64) -> io::Result<u64>>,
 }
 
 /// An element decoded from a fourleaf stream.
@@ -235,7 +253,7 @@ impl<R> Decoder<R> {
 impl<T : AsRef<[u8]>> Decoder<TransparentCursor<T>> {
     /// Create a new decoder which decodes the given slice.
     pub fn from_slice(t: T) -> Self {
-        Self::new(TransparentCursor(io::Cursor::new(t)))
+        Self::new_seek(TransparentCursor(io::Cursor::new(t)))
     }
 }
 
@@ -256,6 +274,63 @@ impl<R : Read> Decoder<R> {
             eof: false,
             blob_end: 0,
             graceful_eof: false,
+            skip: Nd(Self::skip_by_discard),
+        }
+    }
+
+    /// Like `new()`, but if the decoder needs to skip a blob, it will use
+    /// `seek()` instead of reading and discarding data.
+    ///
+    /// Once specialisation becomes stable, this method will likely be
+    /// deprecated as detecting to use `seek()` will be determined
+    /// automatically.
+    pub fn new_seek(input: R) -> Self where R : Seek {
+        Self::new_seek_at(input, 0)
+    }
+
+    /// Like `new_at()`, but if the decoder needs to skip a blob, it will use
+    /// `seek()` instead of reading and discarding data.
+    ///
+    /// Once specialisation becomes stable, this method will likely be
+    /// deprecated as detecting to use `seek()` will be determined
+    /// automatically.
+    pub fn new_seek_at(input: R, offset: u64) -> Self where R : Seek {
+        Decoder {
+            input: input,
+            pos: offset,
+            eof: false,
+            blob_end: 0,
+            graceful_eof: false,
+            skip: Nd(Self::skip_by_seek),
+        }
+    }
+
+    fn skip_by_discard(&mut self, n: u64) -> io::Result<u64> {
+        io::copy(&mut self.input(false).take(n), &mut io::sink())
+    }
+
+    fn skip_by_seek(&mut self, n: u64) -> io::Result<u64> where R : Seek {
+        // If the amount is to large to be passed to `SeekOffset:Current`, split
+        // into smaller pieces. This is fine since we're allowed to fail partially.
+        if n > (i64::MAX as u64) {
+            let first = self.skip_by_seek(i64::MAX as u64)?;
+            if first < (i64::MAX as u64) {
+                Ok(first)
+            } else {
+                let second = self.skip_by_seek(n - first)?;
+                Ok(first + second)
+            }
+        } else {
+            // Otherwise, try to seek directly.
+            self.check_advance_pos(n)?;
+            if self.input.seek(io::SeekFrom::Current(n as i64)).is_ok() {
+                self.pos += n;
+                Ok(n)
+            } else {
+                // If seeking failed (maybe the underlying file descriptor isn't
+                // actually seekable?), fall back to read+discard.
+                self.skip_by_discard(n)
+            }
         }
     }
 
@@ -452,9 +527,7 @@ impl<R : Read> Decoder<R> {
     fn skip_blob(&mut self) -> io::Result<()> {
         if self.blob_end > self.pos {
             let n = self.blob_end - self.pos;
-            // TODO Optimise for `Seek` inputs.
-            let skipped = io::copy(&mut self.input(false).take(n),
-                                   &mut io::sink())?;
+            let skipped = (self.skip.0)(self, n)?;
             if skipped < n {
                 return Err(io::Error::new(
                     io::ErrorKind::UnexpectedEof,
