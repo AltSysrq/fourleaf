@@ -7,8 +7,6 @@
 // option. This file may not be copied, modified, or distributed
 // except according to those terms.
 
-#[macro_use] extern crate enum_primitive;
-extern crate num_traits;
+//! The streaming fourleaf encoders and decoders.
 
-pub mod wire;
-pub mod stream;
+pub mod dec;

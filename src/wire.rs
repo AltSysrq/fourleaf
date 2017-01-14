@@ -26,9 +26,14 @@ use num_traits::FromPrimitive;
 pub trait Input<'a> {
     /// Read and return a single byte.
     fn read_byte(&mut self) -> io::Result<u8>;
+    /// Read and return a single byte, or None if at EOF.
+    fn read_byte_opt(&mut self) -> io::Result<Option<u8>>;
     /// Read the given number of bytes and return them in a slice. The slice
     /// may be a new allocation or be backed by the underlying value.
     fn read_bytes(&mut self, n: usize) -> io::Result<Cow<'a, [u8]>>;
+    /// Discard up to the given number of bytes (as with Read::read but
+    /// discarding the buffer).
+    fn skip(&mut self, n: usize) -> io::Result<usize>;
 }
 
 impl<'a, T : Read> Input<'a> for T {
@@ -38,10 +43,20 @@ impl<'a, T : Read> Input<'a> for T {
         Ok(buf[0])
     }
 
+    fn read_byte_opt(&mut self) -> io::Result<Option<u8>> {
+        let mut buf = [0u8];
+        let n = self.read(&mut buf)?;
+        Ok(if 0 == n { None } else { Some(buf[0]) })
+    }
+
     fn read_bytes(&mut self, n: usize) -> io::Result<Cow<'a, [u8]>> {
         let mut buf = vec![0u8;n];
         self.read_exact(&mut buf[..])?;
         Ok(Cow::Owned(buf))
+    }
+
+    fn skip(&mut self, n: usize) -> io::Result<usize> {
+        io::copy(&mut self.take(n as u64), &mut io::sink()).map(|v| v as usize)
     }
 }
 
@@ -55,6 +70,10 @@ impl<'a> Input<'a> for ZeroCopy<&'a [u8]> {
         self.0.read_byte()
     }
 
+    fn read_byte_opt(&mut self) -> io::Result<Option<u8>> {
+        self.0.read_byte_opt()
+    }
+
     fn read_bytes(&mut self, n: usize) -> io::Result<Cow<'a, [u8]>> {
         if n > self.0.len() {
             Err(io::Error::new(io::ErrorKind::UnexpectedEof,
@@ -64,6 +83,10 @@ impl<'a> Input<'a> for ZeroCopy<&'a [u8]> {
             self.0 = &self.0[n..];
             Ok(Cow::Borrowed(ret))
         }
+    }
+
+    fn skip(&mut self, n: usize) -> io::Result<usize> {
+        self.read_bytes(n).map(|b| b.len())
     }
 }
 
@@ -176,17 +199,27 @@ pub fn encode_u64<W : Write>(w: &mut W, mut i: u64) -> io::Result<()> {
     w.write_all(&mut bytes[..n])
 }
 
+/// Invert `zigzag`.
+pub fn unzigzag(i: u64) -> i64 {
+    let sign = if (i & 1) != 0 { !0u64 } else { 0 };
+    ((i >> 1) ^ sign) as i64
+}
+
 /// Decode a 64-bit integer and then unZigZag it to a signed value.
 pub fn decode_i64<'a, R : Input<'a>>(r: &mut R) -> io::Result<i64> {
     let i = decode_u64(r)?;
-    let sign = if (i & 1) != 0 { !0u64 } else { 0 };
-    Ok(((i >> 1) ^ sign) as i64)
+    Ok(unzigzag(i))
+}
+
+/// ZigZag the given signed 64-bit integer into the unsigned storage format.
+pub fn zigzag(i: i64) -> u64 {
+    ((i << 1) ^ (i >> 63)) as u64
 }
 
 /// ZigZag the given signed 64-bit integer to unsigned format, then write it to
 /// the given output.
 pub fn encode_i64<W : Write>(w: &mut W, i: i64) -> io::Result<()> {
-    encode_u64(w, ((i << 1) ^ (i >> 63)) as u64)
+    encode_u64(w, zigzag(i))
 }
 
 /// Encode the given byte slice as a blob on the given writer.

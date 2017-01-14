@@ -79,7 +79,7 @@ There are four types of special descriptor, keyed off the descriptor type:
 0 - Followed by no data. End of struct (continue parsing the containing struct,
 if any, with the next byte).
 
-1 - Followed by no data. End of stream; stop parsing this struct and all
+1 - Followed by no data. End of document; stop parsing this struct and all
 containers.
 
 2 - Followed by a blob. The blob specifies an error message which the parser
