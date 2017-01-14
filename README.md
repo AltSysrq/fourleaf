@@ -52,7 +52,9 @@ The null type occupies no space.
 Integers are encoded as with
 [protobufs](https://developers.google.com/protocol-buffers/docs/encoding). Note
 that whether zig-zag encoding is used is up to the schema (i.e., signed
-integers use it, unsigned don't).
+integers use it, unsigned don't). It is legal for integers to be in a
+denormalised format; for example, the sequence `81 00` can be used to encode
+the integer 1.
 
 ### blobs
 
