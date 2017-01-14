@@ -46,9 +46,9 @@ pub struct Decoder<R> {
 
 /// An element decoded from a fourleaf stream.
 #[derive(Debug)]
-pub enum Element<D> {
+pub enum Element<'d, R : 'd> {
     /// A normal tag/value pair representing a field.
-    Field(Field<D>),
+    Field(Field<'d, R>),
     /// The end of the struct currently being decoded.
     EndOfStruct,
     /// An explicit end to the whole document, closing all structs being
@@ -57,26 +57,26 @@ pub enum Element<D> {
     /// An exception inserted by the encoder. The blob is usually treated as an
     /// error message as sorts, but this could also be used for in-band
     /// signalling.
-    Exception(Blob<D>),
+    Exception(Blob<'d, R>),
     /// A byte of padding.
     Padding,
 }
 
 /// A field decoded from a fourleaf stream.
 #[derive(Debug)]
-pub struct Field<D> {
+pub struct Field<'d, R : 'd> {
     /// The tag of this field, in the range 1..63, inclusive.
     pub tag: u8,
     /// The offset of this field in the stream. This specifically points to the
     /// byte containing the tag.
     pub pos: u64,
     /// The value of this field.
-    pub value: Value<D>,
+    pub value: Value<'d, R>,
 }
 
 /// A value of a decoded field.
 #[derive(Debug)]
-pub enum Value<D> {
+pub enum Value<'d, R : 'd> {
     /// The null value.
     Null,
     /// General integer values. Conversion to things other than u64 can be
@@ -87,7 +87,7 @@ pub enum Value<D> {
     /// The actual byte sequence has not been read in when the `Value`
     /// is returned. Instead, the `Blob` allows streaming the value out
     /// or obtaining the whole thing at once.
-    Blob(Blob<D>),
+    Blob(Blob<'d, R>),
     /// The start of a child struct.
     ///
     /// This should be handled by "recursing" into the appropriate code to
@@ -107,8 +107,8 @@ pub enum Value<D> {
 /// will want to check `len()` first to make sure the blob has a reasonable
 /// size before calling `get()`.
 #[derive(Debug)]
-pub struct Blob<D> {
-    decoder: D,
+pub struct Blob<'d, R : 'd> {
+    decoder: &'d mut Decoder<R>,
     len: u64,
 }
 
@@ -218,16 +218,12 @@ impl<R : Read> Decoder<R> {
     ///
     /// If you want to use padding or exceptions as in-band signalling, see
     /// `next_element()` instead.
-    pub fn next_field(&mut self)
-                      -> io::Result<Option<Field<&mut Self>>> {
+    pub fn next_field(&mut self) -> io::Result<Option<Field<R>>> {
         match self.next_element_impl(true)? {
             Element::Padding => unreachable!(),
             Element::EndOfStruct | Element::EndOfDoc => return Ok(None),
             Element::Field(field) => return Ok(Some(field)),
-            Element::Exception(blob) => {
-                // XXX If we don't explicitly give `blob` a type here, rustc
-                // seems to think that `'a` is a free lifetime.
-                let mut blob: Blob<&mut Decoder<R>> = blob;
+            Element::Exception(mut blob) => {
                 let message = blob.read_or_trunc(256)?;
                 return Err(io::Error::new(
                     io::ErrorKind::Other,
@@ -248,8 +244,7 @@ impl<R : Read> Decoder<R> {
     ///
     /// If this call returns `Element::EndOfDoc`, the `eof()` flag is
     /// implicitly set.
-    pub fn next_element(&mut self)
-                        -> io::Result<Element<&mut Self>> {
+    pub fn next_element(&mut self) -> io::Result<Element<R>> {
         self.next_element_impl(false)
     }
 
@@ -260,7 +255,7 @@ impl<R : Read> Decoder<R> {
     /// sometimes returns in the loop extends the loop borrows to the end of
     /// the function.
     fn next_element_impl(&mut self, skip_padding: bool)
-                         -> io::Result<Element<&mut Self>> {
+                         -> io::Result<Element<R>> {
         if self.eof {
             return Ok(Element::EndOfDoc);
         }
@@ -300,7 +295,7 @@ impl<R : Read> Decoder<R> {
     }
 
     fn next_value(&mut self, ty: DescriptorType)
-                  -> io::Result<Value<&mut Self>> {
+                  -> io::Result<Value<R>> {
         Ok(match ty {
             DescriptorType::Null => Value::Null,
             DescriptorType::Integer => Value::Integer(
@@ -310,7 +305,7 @@ impl<R : Read> Decoder<R> {
         })
     }
 
-    fn next_blob(&mut self) -> io::Result<Blob<&mut Self>> {
+    fn next_blob(&mut self) -> io::Result<Blob<R>> {
         let len = wire::decode_u64(&mut self.input(false))?;
         self.blob_end = self.pos + len;
         Ok(Blob {
@@ -340,7 +335,7 @@ impl<R : Read> Decoder<R> {
     }
 }
 
-impl<'d, R : 'd> Blob<&'d mut Decoder<R>> {
+impl<'d, R : 'd> Blob<'d, R> {
     /// Returns the size of this blob, in bytes.
     pub fn len(&self) -> u64 {
         self.len
@@ -374,7 +369,7 @@ impl<'d, R : 'd> Blob<&'d mut Decoder<R>> {
     }
 }
 
-impl<'d, R : Read + 'd> Blob<&'d mut Decoder<R>> {
+impl<'d, R : Read + 'd> Blob<'d, R> {
     /// Reads the full remaining value of this blob.
     ///
     /// The content of the blob is buffered into a `Vec<u8>` and that is
@@ -413,7 +408,7 @@ impl<'d, R : Read + 'd> Blob<&'d mut Decoder<R>> {
     }
 }
 
-impl<'d, R : AsRef<[u8]>> Blob<&'d mut Decoder<R>> {
+impl<'d, R : AsRef<[u8]> + 'd> Blob<'d, R> {
     /// Returns a reference to the unconsumed bytes in this blob.
     ///
     /// This does not consume the blob.
@@ -431,7 +426,7 @@ impl<'d, R : AsRef<[u8]>> Blob<&'d mut Decoder<R>> {
     }
 }
 
-impl<'d, R : AsMut<[u8]>> Blob<&'d mut Decoder<R>> {
+impl<'d, R : AsMut<[u8]> + 'd> Blob<'d, R> {
     /// Returns a mutable reference to the unconsumed bytes in this blob.
     ///
     /// This does not consume the blob.
@@ -449,7 +444,7 @@ impl<'d, R : AsMut<[u8]>> Blob<&'d mut Decoder<R>> {
     }
 }
 
-impl<'d, R : Read + 'd> Read for Blob<&'d mut Decoder<R>> {
+impl<'d, R : Read + 'd> Read for Blob<'d, R> {
     fn read(&mut self, mut buf: &mut [u8]) -> io::Result<usize> {
         let remaining = self.remaining();
 
@@ -468,7 +463,7 @@ impl<'d, R : Read + 'd> Read for Blob<&'d mut Decoder<R>> {
     }
 }
 
-impl<'d, R : Seek + 'd> Seek for Blob<&'d mut Decoder<R>> {
+impl<'d, R : Seek + 'd> Seek for Blob<'d, R> {
     fn seek(&mut self, pos: io::SeekFrom) -> io::Result<u64> {
         macro_rules! check {
             ($cond:expr) => { if !($cond) {
@@ -562,7 +557,7 @@ macro_rules! to_int {
 
 fn id<T>(t: T) -> T { t }
 
-impl<D> Value<D> {
+impl<'d, R : 'd> Value<'d, R> {
     /// If this value is Null, return `()`. Otherwise, return an error message.
     pub fn to_null(&self) -> Result<(), &'static str> {
         match *self {
@@ -610,7 +605,7 @@ impl<D> Value<D> {
     /// If this value is a Blob, return a reference to the blob.
     ///
     /// An error is returned if this value is not a blob.
-    pub fn to_blob(&mut self) -> Result<&mut Blob<D>, &'static str> {
+    pub fn to_blob(&mut self) -> Result<&mut Blob<'d, R>, &'static str> {
         match *self {
             Value::Blob(ref mut b) => Ok(b),
             Value::Null => Err("Expected Blob, got Null"),
