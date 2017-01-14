@@ -9,12 +9,10 @@
 
 //! Functionality for decoding a fourleaf stream in terms of tag/value pairs.
 
-use std::borrow::Cow;
-use std::cmp::min;
-use std::io::{self, Read};
+use std::io::{self, Read, Seek};
 use std::{i8, u8, i16, u16, i32, u32, i64, u64, isize, usize};
 
-use wire::{self, Input, DescriptorType, ParsedDescriptor, SpecialType};
+use wire::{self, DescriptorType, ParsedDescriptor, SpecialType};
 
 /// Streaming fourleaf parser.
 ///
@@ -39,9 +37,8 @@ pub struct Decoder<R> {
     pos: u64,
     /// Whether an `EndOfDoc` special descriptor was encountered.
     eof: bool,
-    /// If there is a partially-consumed blob, the number of bytes remaining in
-    /// that blob.
-    in_blob: u64,
+    /// If there is a partially-consumed blob, the byte offset where it ends.
+    blob_end: u64,
     /// Whether an EOF from the underlying input should be translated to an
     /// `EndOfDoc` descriptor.
     graceful_eof: bool,
@@ -117,40 +114,23 @@ pub struct Blob<D> {
 
 #[derive(Debug)]
 struct DecoderInput<'d, R : 'd>(&'d mut Decoder<R>, bool);
-impl<'d, 'a: 'd, R : Input<'a>> Input<'a> for DecoderInput<'d, R> {
-    fn read_byte(&mut self) -> io::Result<u8> {
-        if self.1 {
-            self.read_byte_opt().map(|o| o.unwrap_or(
-                wire::SpecialType::EndOfDoc as u8))
+impl<'d, R : Read> Read for DecoderInput<'d, R> {
+    fn read(&mut self, buf: &mut [u8]) -> io::Result<usize> {
+        if buf.is_empty() { return Ok(0); }
+
+        let n = self.0.input.read(buf)?;
+        self.0.pos += n as u64;
+
+        if 0 == n && self.1 {
+            buf[0] = wire::SpecialType::EndOfDoc as u8;
+            Ok(1)
         } else {
-            let byte = self.0.input.read_byte()?;
-            self.0.pos += 1;
-            Ok(byte)
+            Ok(n)
         }
-    }
-
-    fn read_byte_opt(&mut self) -> io::Result<Option<u8>> {
-        let r = self.0.input.read_byte_opt()?;
-        if r.is_some() {
-            self.0.pos += 1;
-        }
-        Ok(r)
-    }
-
-    fn read_bytes(&mut self, n: usize) -> io::Result<Cow<'a, [u8]>> {
-        let bytes = self.0.input.read_bytes(n)?;
-        self.0.pos += bytes.len() as u64;
-        Ok(bytes)
-    }
-
-    fn skip(&mut self, n: usize) -> io::Result<usize> {
-        let skipped = self.0.input.skip(n)?;
-        self.0.pos += skipped as u64;
-        Ok(skipped)
     }
 }
 
-impl<'a, R : Input<'a>> Decoder<R> {
+impl<R : Read> Decoder<R> {
     /// Create a new decoder starting from byte offset 0.
     pub fn new(input: R) -> Self {
         Self::new_at(input, 0)
@@ -165,7 +145,7 @@ impl<'a, R : Input<'a>> Decoder<R> {
             input: input,
             pos: offset,
             eof: false,
-            in_blob: 0,
+            blob_end: 0,
             graceful_eof: false,
         }
     }
@@ -248,7 +228,7 @@ impl<'a, R : Input<'a>> Decoder<R> {
                 // XXX If we don't explicitly give `blob` a type here, rustc
                 // seems to think that `'a` is a free lifetime.
                 let mut blob: Blob<&mut Decoder<R>> = blob;
-                let message = blob.get_or_trunc(256)?;
+                let message = blob.read_or_trunc(256)?;
                 return Err(io::Error::new(
                     io::ErrorKind::Other,
                     format!("Error message in stream: {:?}",
@@ -332,7 +312,7 @@ impl<'a, R : Input<'a>> Decoder<R> {
 
     fn next_blob(&mut self) -> io::Result<Blob<&mut Self>> {
         let len = wire::decode_u64(&mut self.input(false))?;
-        self.in_blob = len;
+        self.blob_end = self.pos + len;
         Ok(Blob {
             decoder: self,
             len: len,
@@ -345,17 +325,22 @@ impl<'a, R : Input<'a>> Decoder<R> {
     }
 
     fn skip_blob(&mut self) -> io::Result<()> {
-        while 0 != self.in_blob {
-            let in_blob = self.in_blob;
-            let skipped = self.input(false).skip(
-                min(in_blob, usize::MAX as u64) as usize)? as u64;
-            self.in_blob -= skipped;
+        if self.blob_end > self.pos {
+            let n = self.blob_end - self.pos;
+            // TODO Optimise for `Seek` inputs.
+            let skipped = io::copy(&mut self.input(false).take(n),
+                                   &mut io::sink())?;
+            if skipped < n {
+                return Err(io::Error::new(
+                    io::ErrorKind::UnexpectedEof,
+                    "EOF reached before end of blob"));
+            }
         }
         Ok(())
     }
 }
 
-impl<'d, 'a : 'd, R : Input<'a>> Blob<&'d mut Decoder<R>> {
+impl<'d, R : 'd> Blob<&'d mut Decoder<R>> {
     /// Returns the size of this blob, in bytes.
     pub fn len(&self) -> u64 {
         self.len
@@ -363,7 +348,7 @@ impl<'d, 'a : 'd, R : Input<'a>> Blob<&'d mut Decoder<R>> {
 
     /// Returns the number of unconsumed bytes in this blob.
     pub fn remaining(&self) -> u64 {
-        self.decoder.in_blob
+        self.decoder.blob_end - self.decoder.pos
     }
 
     /// Returns the current byte offset of the decoder.
@@ -374,20 +359,27 @@ impl<'d, 'a : 'd, R : Input<'a>> Blob<&'d mut Decoder<R>> {
     /// Returns the byte offset of the first byte in this blob (regardless of
     /// how much of the blob has been consumed).
     pub fn start_pos(&self) -> u64 {
-        self.decoder.pos - (self.len - self.decoder.in_blob)
+        self.decoder.blob_end - self.len
+    }
+
+    /// Returns the byte offset one past the last byte in this blob.
+    pub fn end_pos(&self) -> u64 {
+        self.decoder.blob_end
     }
 
     /// Returns the current byte offset into this blob; i.e., the number of
     /// bytes that have been consumed.
     pub fn inner_pos(&self) -> u64 {
-        self.len - self.decoder.in_blob
+        self.len - self.remaining()
     }
+}
 
+impl<'d, R : Read + 'd> Blob<&'d mut Decoder<R>> {
     /// Reads the full remaining value of this blob.
     ///
-    /// If the underlying reader supports it, this simply returns a slice into
-    /// the input buffer. Otherwise, the content of the blob is buffered into a
-    /// `Vec<u8>` and that is returned.
+    /// The content of the blob is buffered into a `Vec<u8>` and that is
+    /// returned. If you are decoding a byte slice, consider using `slice()`
+    /// instead, which will not need to copy the blob.
     ///
     /// `max` indicates the maximum size of the blob to extract. If you fully
     /// trust the input or know that it is already fully buffered, one can
@@ -395,49 +387,144 @@ impl<'d, 'a : 'd, R : Input<'a>> Blob<&'d mut Decoder<R>> {
     /// maximum reasonable allocation size should be given instead.
     ///
     /// If the length of this blob is larger than `max`, an error is returned.
-    pub fn get(&mut self, max: usize) -> io::Result<Cow<'a, [u8]>> {
-        if self.decoder.in_blob > (max as u64) {
+    pub fn read_fully(&mut self, max: usize) -> io::Result<Vec<u8>> {
+        if self.remaining() > (max as u64) {
             return Err(io::Error::new(
                 io::ErrorKind::InvalidData,
                 "Blob length longer than maximum size"));
         }
 
-        let ret = self.decoder.input(false).read_bytes(self.len as usize)?;
-        self.decoder.in_blob -= ret.len() as u64;
+        let mut ret = Vec::new();
+        self.read_to_end(&mut ret)?;
         Ok(ret)
     }
 
     /// Reads up to `max` bytes of this blob.
     ///
-    /// This mostly behaves like `get()`, except that if the blob is larger
-    /// than `max`, it is implicitly truncated instead.
+    /// This mostly behaves like `read_fully()`, except that if the blob is
+    /// larger than `max`, it is implicitly truncated instead.
     ///
     /// If this does not read the full blob, it is still possible to read the
     /// remaining parts via further calls to methods on the blob.
-    pub fn get_or_trunc(&mut self, max: usize) -> io::Result<Cow<'a, [u8]>> {
-        let len = min(self.decoder.in_blob, max as u64) as usize;
-        let ret = self.decoder.input(false).read_bytes(len)?;
-        self.decoder.in_blob -= ret.len() as u64;
+    pub fn read_or_trunc(&mut self, max: usize) -> io::Result<Vec<u8>> {
+        let mut ret = Vec::new();
+        self.take(max as u64).read_to_end(&mut ret)?;
         Ok(ret)
+    }
+}
+
+impl<'d, R : AsRef<[u8]>> Blob<&'d mut Decoder<R>> {
+    /// Returns a reference to the unconsumed bytes in this blob.
+    ///
+    /// This does not consume the blob.
+    ///
+    /// Returns `None` if the nominal length of the blob is larger than the
+    /// underlying slice.
+    pub fn slice(&self) -> Option<&[u8]> {
+        let rem = self.remaining();
+        let input = self.decoder.input.as_ref();
+        if rem <= (input.len() as u64) {
+            Some(&input[..(rem as usize)])
+        } else {
+            None
+        }
+    }
+}
+
+impl<'d, R : AsMut<[u8]>> Blob<&'d mut Decoder<R>> {
+    /// Returns a mutable reference to the unconsumed bytes in this blob.
+    ///
+    /// This does not consume the blob.
+    ///
+    /// The caller is free to manipulate the content of the blob arbitrarily;
+    /// this will not corrupt the underlying file.
+    pub fn slice_mut(&mut self) -> Option<&mut [u8]> {
+        let rem = self.remaining();
+        let input = self.decoder.input.as_mut();
+        if rem <= (input.len() as u64) {
+            Some(&mut input[..(rem as usize)])
+        } else {
+            None
+        }
     }
 }
 
 impl<'d, R : Read + 'd> Read for Blob<&'d mut Decoder<R>> {
     fn read(&mut self, mut buf: &mut [u8]) -> io::Result<usize> {
-        if 0 == self.decoder.in_blob {
+        let remaining = self.remaining();
+
+        if 0 == remaining {
             return Ok(0);
         }
 
-        let buf = if buf.len() as u64 > self.decoder.in_blob {
-            &mut buf[..(self.decoder.in_blob as usize)]
+        let buf = if buf.len() as u64 > remaining {
+            &mut buf[..(remaining as usize)]
         } else {
             buf
         };
 
-        let n = self.decoder.input.read(buf)?;
-        self.decoder.pos += n as u64;
-        self.decoder.in_blob -= n as u64;
+        let n = self.decoder.input(false).read(buf)?;
         Ok(n)
+    }
+}
+
+impl<'d, R : Seek + 'd> Seek for Blob<&'d mut Decoder<R>> {
+    fn seek(&mut self, pos: io::SeekFrom) -> io::Result<u64> {
+        macro_rules! check {
+            ($cond:expr) => { if !($cond) {
+                return Err(io::Error::new(
+                    io::ErrorKind::InvalidInput,
+                    "seek out of blob bounds"));
+            } }
+        }
+
+        let pos = match pos {
+            io::SeekFrom::Start(pos) => {
+                check!(pos <= self.len());
+                self.start_pos() + pos
+            },
+            io::SeekFrom::End(off) => {
+                check!(off <= 0);
+                let off = (-off) as u64;
+                check!(off <= self.len);
+                self.start_pos() + (self.len - off)
+            },
+            io::SeekFrom::Current(off) => {
+                if off < 0 {
+                    let off = (-off) as u64;
+                    check!(off <= self.inner_pos());
+                    self.decoder_pos() - off
+                } else {
+                    let off = off as u64;
+                    check!(off <= self.remaining());
+                    self.decoder_pos() + off
+                }
+            },
+        };
+
+        if pos < self.decoder_pos() {
+            let displacement = self.decoder_pos() - pos;
+            if pos > (i64::MAX as u64) {
+                return Err(io::Error::new(
+                    io::ErrorKind::Other,
+                    "Cannot seek blob by >= 8 EB at a time"));
+            }
+            self.decoder.input.seek(
+                io::SeekFrom::Current(-(displacement as i64)))?;
+            self.decoder.pos -= displacement;
+        } else {
+            let displacement = pos - self.decoder_pos();
+            if pos > (i64::MAX as u64) {
+                return Err(io::Error::new(
+                    io::ErrorKind::Other,
+                    "Cannot seek blob by >= 8 EB at a time"));
+            }
+            self.decoder.input.seek(
+                io::SeekFrom::Current(displacement as i64))?;
+            self.decoder.pos += displacement;
+        }
+
+        Ok(self.inner_pos())
     }
 }
 
@@ -540,7 +627,7 @@ mod test {
 
     use super::*;
 
-    fn decoder(text: &str) -> Decoder<io::Cursor<Vec<u8>>> {
+    fn parse(text: &str) -> Vec<u8> {
         let mut data = Vec::new();
 
         fn decode_hexit(c: char) -> u8 {
@@ -576,7 +663,11 @@ mod test {
             }
         }
 
-        Decoder::new(io::Cursor::new(data))
+        data
+    }
+
+    fn decoder(text: &str) -> Decoder<io::Cursor<Vec<u8>>> {
+        Decoder::new(io::Cursor::new(parse(text)))
     }
 
     #[test]
@@ -648,15 +739,17 @@ mod test {
             assert_eq!(11, blob.len());
             assert_eq!(11, blob.remaining());
             assert_eq!(2, blob.start_pos());
+            assert_eq!(13, blob.end_pos());
             assert_eq!(2, blob.decoder_pos());
             assert_eq!(0, blob.inner_pos());
 
-            let data = blob.get(65536).unwrap();
+            let data = blob.read_fully(65536).unwrap();
             assert_eq!(b"hello world", &data[..]);
 
             assert_eq!(11, blob.len());
             assert_eq!(0, blob.remaining());
             assert_eq!(2, blob.start_pos());
+            assert_eq!(13, blob.end_pos());
             assert_eq!(13, blob.decoder_pos());
             assert_eq!(11, blob.inner_pos());
         }
@@ -672,12 +765,13 @@ mod test {
             let mut field = dec.next_field().unwrap().unwrap();
             let blob = field.value.to_blob().unwrap();
 
-            let data4 = blob.get_or_trunc(4).unwrap();
+            let data4 = blob.read_or_trunc(4).unwrap();
             assert_eq!(b"hell", &data4[..]);
 
             assert_eq!(11, blob.len());
             assert_eq!(7, blob.remaining());
             assert_eq!(2, blob.start_pos());
+            assert_eq!(13, blob.end_pos());
             assert_eq!(6, blob.decoder_pos());
             assert_eq!(4, blob.inner_pos());
 
@@ -688,6 +782,7 @@ mod test {
             assert_eq!(11, blob.len());
             assert_eq!(2, blob.remaining());
             assert_eq!(2, blob.start_pos());
+            assert_eq!(13, blob.end_pos());
             assert_eq!(11, blob.decoder_pos());
             assert_eq!(9, blob.inner_pos());
 
@@ -712,7 +807,7 @@ mod test {
             let mut field = dec.next_field().unwrap().unwrap();
             let blob = field.value.to_blob().unwrap();
 
-            assert!(blob.get(256).is_err());
+            assert!(blob.read_fully(256).is_err());
         }
     }
 

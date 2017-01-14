@@ -12,82 +12,14 @@
 //! External code generally should not use things from this module; instead,
 //! prefer the `stream` module if you want to do lower-level streaming.
 
-use std::borrow::Cow;
 use std::io::{self, Read, Write};
-use std::usize;
 
 use num_traits::FromPrimitive;
 
-/// Used for reading bytes from a stream.
-///
-/// This is similar to `io::Read`, but allows bulk reads to return references
-/// into an underlying byte slice instead of requiring a copy to a heap
-/// allocation.
-pub trait Input<'a> {
-    /// Read and return a single byte.
-    fn read_byte(&mut self) -> io::Result<u8>;
-    /// Read and return a single byte, or None if at EOF.
-    fn read_byte_opt(&mut self) -> io::Result<Option<u8>>;
-    /// Read the given number of bytes and return them in a slice. The slice
-    /// may be a new allocation or be backed by the underlying value.
-    fn read_bytes(&mut self, n: usize) -> io::Result<Cow<'a, [u8]>>;
-    /// Discard up to the given number of bytes (as with Read::read but
-    /// discarding the buffer).
-    fn skip(&mut self, n: usize) -> io::Result<usize>;
-}
-
-impl<'a, T : Read> Input<'a> for T {
-    fn read_byte(&mut self) -> io::Result<u8> {
-        let mut buf = [0u8];
-        self.read_exact(&mut buf)?;
-        Ok(buf[0])
-    }
-
-    fn read_byte_opt(&mut self) -> io::Result<Option<u8>> {
-        let mut buf = [0u8];
-        let n = self.read(&mut buf)?;
-        Ok(if 0 == n { None } else { Some(buf[0]) })
-    }
-
-    fn read_bytes(&mut self, n: usize) -> io::Result<Cow<'a, [u8]>> {
-        let mut buf = vec![0u8;n];
-        self.read_exact(&mut buf[..])?;
-        Ok(Cow::Owned(buf))
-    }
-
-    fn skip(&mut self, n: usize) -> io::Result<usize> {
-        io::copy(&mut self.take(n as u64), &mut io::sink()).map(|v| v as usize)
-    }
-}
-
-/// Wraps byte-slice-like things to use an `Input` implementation which returns
-/// slices into the referenced buffer instead of copying.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub struct ZeroCopy<T>(pub T);
-
-impl<'a> Input<'a> for ZeroCopy<&'a [u8]> {
-    fn read_byte(&mut self) -> io::Result<u8> {
-        self.0.read_byte()
-    }
-
-    fn read_byte_opt(&mut self) -> io::Result<Option<u8>> {
-        self.0.read_byte_opt()
-    }
-
-    fn read_bytes(&mut self, n: usize) -> io::Result<Cow<'a, [u8]>> {
-        if n > self.0.len() {
-            Err(io::Error::new(io::ErrorKind::UnexpectedEof,
-                               "Not enough bytes in buffer"))
-        } else {
-            let ret = &self.0[..n];
-            self.0 = &self.0[n..];
-            Ok(Cow::Borrowed(ret))
-        }
-    }
-
-    fn skip(&mut self, n: usize) -> io::Result<usize> {
-        self.read_bytes(n).map(|b| b.len())
-    }
+fn read_byte<R : Read>(r: &mut R) -> io::Result<u8> {
+    let mut buf = [0u8;1];
+    r.read_exact(&mut buf)?;
+    Ok(buf[0])
 }
 
 /// A descriptor for an element in a struct, or a marker for the end of the
@@ -158,11 +90,11 @@ impl From<ParsedDescriptor> for Descriptor {
 /// Decode an unsigned integer from the given input, parsing up to 64 bits.
 ///
 /// This fails if the encoded value overflows a u64.
-pub fn decode_u64<'a, R : Input<'a>>(r: &mut R) -> io::Result<u64> {
+pub fn decode_u64<R : Read>(r: &mut R) -> io::Result<u64> {
     let mut accum = 0u64;
     let mut shift = 0;
     loop {
-        let b = r.read_byte()?;
+        let b = read_byte(r)?;
         let v = (b & 0x7F) as u64;
         if v << shift >> shift != v {
             return Err(io::Error::new(
@@ -206,7 +138,7 @@ pub fn unzigzag(i: u64) -> i64 {
 }
 
 /// Decode a 64-bit integer and then unZigZag it to a signed value.
-pub fn decode_i64<'a, R : Input<'a>>(r: &mut R) -> io::Result<i64> {
+pub fn decode_i64<R : Read>(r: &mut R) -> io::Result<i64> {
     let i = decode_u64(r)?;
     Ok(unzigzag(i))
 }
@@ -222,31 +154,10 @@ pub fn encode_i64<W : Write>(w: &mut W, i: i64) -> io::Result<()> {
     encode_u64(w, zigzag(i))
 }
 
-/// Encode the given byte slice as a blob on the given writer.
-pub fn encode_blob<W : Write, D : AsRef<[u8]>>(w: &mut W, data: D)
-                                               -> io::Result<()> {
-    let data = data.as_ref();
-    encode_u64(w, data.len() as u64)?;
-    w.write_all(data)
-}
-
-/// Decode a blob from the given input, returning a cow to the data contained.
-pub fn decode_blob<'a, R : Input<'a>>(r: &mut R)
-                                      -> io::Result<Cow<'a, [u8]>> {
-    let length = decode_u64(r)?;
-    if length > (usize::MAX as u64) {
-        return Err(io::Error::new(
-            io::ErrorKind::InvalidData,
-            "Blob length longer than usize::MAX"));
-    }
-
-    r.read_bytes(length as usize)
-}
-
 /// Read a descriptor from the given input.
-pub fn decode_descriptor<'a, R : Input<'a>>(r: &mut R)
-                                            -> io::Result<Descriptor> {
-    r.read_byte().map(Descriptor)
+pub fn decode_descriptor<R : Read>(r: &mut R)
+                                   -> io::Result<Descriptor> {
+    read_byte(r).map(Descriptor)
 }
 
 /// Write a descriptor to the given output.
@@ -303,25 +214,6 @@ mod test {
     }
 
     #[test]
-    fn blob_encoding_and_decoding() {
-        macro_rules! test {
-            ($v:expr) => { {
-                let mut output = Vec::new();
-                encode_blob(&mut output, $v).unwrap();
-
-                let decoded = decode_blob(&mut&output[..]).unwrap();
-                assert_eq!($v, &*decoded);
-
-                let decoded = decode_blob(&mut ZeroCopy(&output[..])).unwrap();
-                assert_eq!($v, &*decoded);
-            } }
-        }
-        test!(b"");
-        test!(b"hello world");
-        test!(&[42u8;1024][..]);
-    }
-
-    #[test]
     fn descriptor_conversion() {
         macro_rules! test {
             ($n:expr, $v:expr) => { {
@@ -345,22 +237,5 @@ mod test {
         test!(0x7F, ParsedDescriptor::Pair(DescriptorType::Integer, 63));
         test!(0xBF, ParsedDescriptor::Pair(DescriptorType::Blob, 63));
         test!(0xFF, ParsedDescriptor::Pair(DescriptorType::Struct, 63));
-    }
-
-    #[test]
-    fn zero_copy_read_past_end() {
-        let mut zc = ZeroCopy(&b"hello world"[..]);
-        match zc.read_bytes(100) {
-            Ok(v) => panic!("Unexpectedly succeeded with {:?}", v),
-            Err(e) => assert_eq!(io::ErrorKind::UnexpectedEof, e.kind()),
-        }
-    }
-
-    #[test]
-    fn zero_copy_read_advance() {
-        let mut zc = ZeroCopy(&b"hello world"[..]);
-        assert_eq!(b'h', zc.read_byte().unwrap());
-        assert_eq!(b"ell", &*zc.read_bytes(3).unwrap());
-        assert_eq!(b'o', zc.read_byte().unwrap());
     }
 }
