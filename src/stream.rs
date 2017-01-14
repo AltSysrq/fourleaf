@@ -111,9 +111,12 @@ pub struct Stream<R> {
     /// Whether an EOF from the underlying input should be translated to an
     /// `EndOfDoc` descriptor.
     graceful_eof: bool,
-    /// Function to use to skip `n` bytes in `input`. Returns the actual number
-    /// of bytes skipped.
-    skip: Nd<fn (inner: &mut Stream<R>, n: u64) -> io::Result<u64>>,
+    /// `Seek::seek` on `inner` if known.
+    seek: Option<Nd<fn (inner: &mut R, whence: io::SeekFrom)
+                        -> io::Result<u64>>>,
+    /// If `Some`, an operation that must be called on `self` to bring the
+    /// stream into a consistent state.
+    commit: Option<Nd<fn (&mut Stream<R>) -> io::Result<()>>>,
 }
 
 /// An element decoded from a fourleaf stream.
@@ -240,17 +243,6 @@ impl<'d, W : Write> Write for StreamTracker<'d, W> {
     }
 }
 
-impl<R> Stream<R> {
-    fn track<'d>(&'d mut self, graceful_eof: bool) -> StreamTracker<'d, R> {
-        let graceful_eof = graceful_eof && self.graceful_eof;
-        StreamTracker(self, graceful_eof)
-    }
-
-    fn check_advance_pos(&self, n: u64) -> io::Result<()> {
-        check_advance_pos(self.pos, n)
-    }
-}
-
 impl<T : AsRef<[u8]>> Stream<TransparentCursor<T>> {
     /// Create a new stream which decodes the given slice.
     pub fn from_slice(t: T) -> Self {
@@ -258,7 +250,7 @@ impl<T : AsRef<[u8]>> Stream<TransparentCursor<T>> {
     }
 }
 
-impl<R : Read> Stream<R> {
+impl<R> Stream<R> {
     /// Create a new stream starting from byte offset 0.
     pub fn new(inner: R) -> Self {
         Stream {
@@ -267,7 +259,8 @@ impl<R : Read> Stream<R> {
             eof: false,
             blob_end: 0,
             graceful_eof: false,
-            skip: Nd(Self::skip_by_discard),
+            seek: None,
+            commit: None,
         }
     }
 
@@ -284,29 +277,35 @@ impl<R : Read> Stream<R> {
             eof: false,
             blob_end: 0,
             graceful_eof: false,
-            skip: Nd(Self::skip_by_seek),
+            seek: Some(Nd(<R as Seek>::seek)),
+            commit: None,
         }
     }
 
-    fn skip_by_discard(&mut self, n: u64) -> io::Result<u64> {
+    fn skip_by_discard(&mut self, n: u64) -> io::Result<u64>
+    where R : Read {
         io::copy(&mut self.track(false).take(n), &mut io::sink())
     }
 
-    fn skip_by_seek(&mut self, n: u64) -> io::Result<u64> where R : Seek {
-        // If the amount is to large to be passed to `SeekOffset:Current`, split
+    fn skip_by_seek(&mut self, n: u64,
+                    seek: fn (&mut R, io::SeekFrom) ->
+                             io::Result<u64>)
+                    -> io::Result<u64>
+    where R : Read {
+        // If the amount is to large to be passed to `SeekFrom:Current`, split
         // into smaller pieces. This is fine since we're allowed to fail partially.
         if n > (i64::MAX as u64) {
-            let first = self.skip_by_seek(i64::MAX as u64)?;
+            let first = self.skip_by_seek(i64::MAX as u64, seek)?;
             if first < (i64::MAX as u64) {
                 Ok(first)
             } else {
-                let second = self.skip_by_seek(n - first)?;
+                let second = self.skip_by_seek(n - first, seek)?;
                 Ok(first + second)
             }
         } else {
             // Otherwise, try to seek directly.
             self.check_advance_pos(n)?;
-            if self.inner.seek(io::SeekFrom::Current(n as i64)).is_ok() {
+            if seek(&mut self.inner, io::SeekFrom::Current(n as i64)).is_ok() {
                 self.pos += n;
                 Ok(n)
             } else {
@@ -317,7 +316,20 @@ impl<R : Read> Stream<R> {
         }
     }
 
+    /// Ensures the `Stream` is in a fully consistent state.
+    pub fn commit(&mut self) -> io::Result<()> {
+        if let Some(Nd(f)) = self.commit {
+            f(self)?;
+            self.commit = None;
+        }
+        Ok(())
+    }
+
     /// Consumes this `Stream` and returns the underlying byte stream.
+    ///
+    /// The byte stream is simply returned at whatever its current position is,
+    /// which could be inside a blob. Use `commit()` to ensure the stream is
+    /// positioned on a field boundary if that is desired.
     pub fn into_inner(self) -> R {
         self.inner
     }
@@ -348,7 +360,7 @@ impl<R : Read> Stream<R> {
     /// This will cause the stream to flush any operations depending on the
     /// current position, and so can encounter IO errors.
     pub fn reset_pos(&mut self, pos: u64) -> io::Result<()> {
-        self.skip_blob()?;
+        self.commit()?;
         self.blob_end = 0;
         self.pos = pos;
         Ok(())
@@ -392,6 +404,15 @@ impl<R : Read> Stream<R> {
         self.graceful_eof = graceful_eof;
     }
 
+    fn track<'d>(&'d mut self, graceful_eof: bool) -> StreamTracker<'d, R> {
+        let graceful_eof = graceful_eof && self.graceful_eof;
+        StreamTracker(self, graceful_eof)
+    }
+
+    fn check_advance_pos(&self, n: u64) -> io::Result<()> {
+        check_advance_pos(self.pos, n)
+    }
+
     /// Decodes the next field.
     ///
     /// If the end of the current struct has been reached, returns `None`, but
@@ -412,7 +433,8 @@ impl<R : Read> Stream<R> {
     ///
     /// If you want to use padding or exceptions as in-band signalling, see
     /// `next_element()` instead.
-    pub fn next_field(&mut self) -> io::Result<Option<Field<R>>> {
+    pub fn next_field(&mut self) -> io::Result<Option<Field<R>>>
+    where R : Read {
         match self.next_element_impl(true)? {
             Element::Padding => unreachable!(),
             Element::EndOfStruct | Element::EndOfDoc => return Ok(None),
@@ -438,7 +460,8 @@ impl<R : Read> Stream<R> {
     ///
     /// If this call returns `Element::EndOfDoc`, the `eof()` flag is
     /// implicitly set.
-    pub fn next_element(&mut self) -> io::Result<Element<R>> {
+    pub fn next_element(&mut self) -> io::Result<Element<R>>
+    where R : Read {
         self.next_element_impl(false)
     }
 
@@ -449,12 +472,13 @@ impl<R : Read> Stream<R> {
     /// sometimes returns in the loop extends the loop borrows to the end of
     /// the function.
     fn next_element_impl(&mut self, skip_padding: bool)
-                         -> io::Result<Element<R>> {
+                         -> io::Result<Element<R>>
+    where R : Read {
         if self.eof {
             return Ok(Element::EndOfDoc);
         }
 
-        self.skip_blob()?;
+        self.commit()?;
 
         loop {
             let offset = self.pos;
@@ -489,7 +513,8 @@ impl<R : Read> Stream<R> {
     }
 
     fn next_value(&mut self, ty: DescriptorType)
-                  -> io::Result<Value<R>> {
+                  -> io::Result<Value<R>>
+    where R : Read {
         Ok(match ty {
             DescriptorType::Null => Value::Null,
             DescriptorType::Integer => Value::Integer(
@@ -499,21 +524,28 @@ impl<R : Read> Stream<R> {
         })
     }
 
-    fn next_blob(&mut self) -> io::Result<Blob<R>> {
+    fn next_blob(&mut self) -> io::Result<Blob<R>>
+    where R : Read {
         let len = wire::decode_u64(&mut self.track(false))?;
         self.check_advance_pos(len)?;
 
         self.blob_end = self.pos + len;
+        self.commit = Some(Nd(Self::skip_blob));
         Ok(Blob {
             stream: self,
             len: len,
         })
     }
 
-    fn skip_blob(&mut self) -> io::Result<()> {
+    fn skip_blob(&mut self) -> io::Result<()>
+    where R : Read {
         if self.blob_end > self.pos {
             let n = self.blob_end - self.pos;
-            let skipped = (self.skip.0)(self, n)?;
+            let skipped = if let Some(seek) = self.seek {
+                self.skip_by_seek(n, seek.0)
+            } else {
+                self.skip_by_discard(n)
+            }?;
             if skipped < n {
                 return Err(io::Error::new(
                     io::ErrorKind::UnexpectedEof,
@@ -566,9 +598,7 @@ impl<'d, R : 'd> Blob<'d, R> {
     pub fn inner_pos(&self) -> u64 {
         self.len - self.remaining()
     }
-}
 
-impl<'d, R : Read + 'd> Blob<'d, R> {
     /// Reads the full remaining value of this blob.
     ///
     /// The content of the blob is buffered into a `Vec<u8>` and that is
@@ -581,7 +611,8 @@ impl<'d, R : Read + 'd> Blob<'d, R> {
     /// maximum reasonable allocation size should be given instead.
     ///
     /// If the length of this blob is larger than `max`, an error is returned.
-    pub fn read_fully(&mut self, max: usize) -> io::Result<Vec<u8>> {
+    pub fn read_fully(&mut self, max: usize) -> io::Result<Vec<u8>>
+    where R : Read {
         if self.remaining() > (max as u64) {
             return Err(io::Error::new(
                 io::ErrorKind::InvalidData,
@@ -600,7 +631,8 @@ impl<'d, R : Read + 'd> Blob<'d, R> {
     ///
     /// If this does not read the full blob, it is still possible to read the
     /// remaining parts via further calls to methods on the blob.
-    pub fn read_or_trunc(&mut self, max: usize) -> io::Result<Vec<u8>> {
+    pub fn read_or_trunc(&mut self, max: usize) -> io::Result<Vec<u8>>
+    where R : Read {
         let mut ret = Vec::new();
         self.take(max as u64).read_to_end(&mut ret)?;
         Ok(ret)
