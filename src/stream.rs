@@ -261,17 +261,9 @@ impl<T : AsRef<[u8]>> Stream<TransparentCursor<T>> {
 impl<R : Read> Stream<R> {
     /// Create a new stream starting from byte offset 0.
     pub fn new(inner: R) -> Self {
-        Self::new_at(inner, 0)
-    }
-
-    /// Create a new stream with the byte offset starting at the given value.
-    ///
-    /// Note that `offset` does not cause `inner` to be seeked; rather, it
-    /// simply sets the initial value for byte offset tracking.
-    pub fn new_at(inner: R, offset: u64) -> Self {
         Stream {
             inner: inner,
-            pos: offset,
+            pos: 0,
             eof: false,
             blob_end: 0,
             graceful_eof: false,
@@ -286,19 +278,9 @@ impl<R : Read> Stream<R> {
     /// deprecated as detecting to use `seek()` will be determined
     /// automatically.
     pub fn new_seek(inner: R) -> Self where R : Seek {
-        Self::new_seek_at(inner, 0)
-    }
-
-    /// Like `new_at()`, but if the stream needs to skip a blob, it will use
-    /// `seek()` instead of reading and discarding data.
-    ///
-    /// Once specialisation becomes stable, this method will likely be
-    /// deprecated as detecting to use `seek()` will be determined
-    /// automatically.
-    pub fn new_seek_at(inner: R, offset: u64) -> Self where R : Seek {
         Stream {
             inner: inner,
-            pos: offset,
+            pos: 0,
             eof: false,
             blob_end: 0,
             graceful_eof: false,
@@ -351,7 +333,8 @@ impl<R : Read> Stream<R> {
     /// This should only be used if some operation outside the stream's
     /// control caused the position of the byte stream to actually change, as
     /// the stream will assume that other positions it maintains are still
-    /// valid.
+    /// valid. It may also be used immediately after construction to change the
+    /// starting offset value.
     ///
     /// To change the _logical_ position in the byte stream, use `reset_pos()`
     /// instead.
