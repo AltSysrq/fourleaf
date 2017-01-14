@@ -9,7 +9,8 @@
 
 //! Functionality for decoding a fourleaf stream in terms of tag/value pairs.
 
-use std::io::{self, Read, Seek};
+use std::cmp::min;
+use std::io::{self, Read, Seek, Write};
 use std::{i8, u8, i16, u16, i32, u32, i64, u64, isize, usize};
 
 use wire::{self, DescriptorType, ParsedDescriptor, SpecialType};
@@ -99,13 +100,11 @@ pub enum Value<'d, R : 'd> {
 
 /// A handle to a blob within the fourleaf stream.
 ///
-/// If the input to the decoder is `io::Read`, this is also `io::Read` and can
-/// be used to read the content of the blob that way. Otherwise, `get()` must
-/// be used to fetch the content.
-///
-/// If parsing untrusted input which is not already buffered into memory, you
-/// will want to check `len()` first to make sure the blob has a reasonable
-/// size before calling `get()`.
+/// A `Blob` forwards `Read`, `Seek`, and `Write` implementations to the
+/// underlying input to the decoder, adapted to treat the `Blob` essentially as
+/// a "file" of its own. Note that while one can make in-place writes to the
+/// `Blob`, you cannot do anything that would change its size, such as writing
+/// or seeking past the end.
 #[derive(Debug)]
 pub struct Blob<'d, R : 'd> {
     decoder: &'d mut Decoder<R>,
@@ -127,6 +126,26 @@ impl<'d, R : Read> Read for DecoderInput<'d, R> {
         } else {
             Ok(n)
         }
+    }
+}
+impl<'d, W : Write> Write for DecoderInput<'d, W> {
+    fn write(&mut self, buf: &[u8]) -> io::Result<usize> {
+        if buf.is_empty() { return Ok(0); }
+
+        let n = self.0.input.write(buf)?;
+        self.0.pos += n as u64;
+        Ok(n)
+    }
+
+    fn flush(&mut self) -> io::Result<()> {
+        self.0.input.flush()
+    }
+}
+
+impl<R> Decoder<R> {
+    fn input<'d>(&'d mut self, graceful_eof: bool) -> DecoderInput<'d, R> {
+        let graceful_eof = graceful_eof && self.graceful_eof;
+        DecoderInput(self, graceful_eof)
     }
 }
 
@@ -314,11 +333,6 @@ impl<R : Read> Decoder<R> {
         })
     }
 
-    fn input<'d>(&'d mut self, graceful_eof: bool) -> DecoderInput<'d, R> {
-        let graceful_eof = graceful_eof && self.graceful_eof;
-        DecoderInput(self, graceful_eof)
-    }
-
     fn skip_blob(&mut self) -> io::Result<()> {
         if self.blob_end > self.pos {
             let n = self.blob_end - self.pos;
@@ -432,7 +446,8 @@ impl<'d, R : AsMut<[u8]> + 'd> Blob<'d, R> {
     /// This does not consume the blob.
     ///
     /// The caller is free to manipulate the content of the blob arbitrarily;
-    /// this will not corrupt the underlying file.
+    /// this will not corrupt the underlying data (but will obviously modify
+    /// it).
     pub fn slice_mut(&mut self) -> Option<&mut [u8]> {
         let rem = self.remaining();
         let input = self.decoder.input.as_mut();
@@ -460,6 +475,19 @@ impl<'d, R : Read + 'd> Read for Blob<'d, R> {
 
         let n = self.decoder.input(false).read(buf)?;
         Ok(n)
+    }
+}
+
+impl<'d, W : Write + 'd> Write for Blob<'d, W> {
+    fn write(&mut self, buf: &[u8]) -> io::Result<usize> {
+        let avail = min(buf.len(),
+                        min(self.remaining(), usize::MAX as u64) as usize);
+
+        self.decoder.input(false).write(&buf[..avail])
+    }
+
+    fn flush(&mut self) -> io::Result<()> {
+        self.decoder.input(false).flush()
     }
 }
 
