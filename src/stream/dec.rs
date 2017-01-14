@@ -116,6 +116,7 @@ struct DecoderInput<'d, R : 'd>(&'d mut Decoder<R>, bool);
 impl<'d, R : Read> Read for DecoderInput<'d, R> {
     fn read(&mut self, buf: &mut [u8]) -> io::Result<usize> {
         if buf.is_empty() { return Ok(0); }
+        self.0.check_advance_pos(buf.len() as u64)?;
 
         let n = self.0.input.read(buf)?;
         self.0.pos += n as u64;
@@ -131,6 +132,7 @@ impl<'d, R : Read> Read for DecoderInput<'d, R> {
 impl<'d, W : Write> Write for DecoderInput<'d, W> {
     fn write(&mut self, buf: &[u8]) -> io::Result<usize> {
         if buf.is_empty() { return Ok(0); }
+        self.0.check_advance_pos(buf.len() as u64)?;
 
         let n = self.0.input.write(buf)?;
         self.0.pos += n as u64;
@@ -146,6 +148,16 @@ impl<R> Decoder<R> {
     fn input<'d>(&'d mut self, graceful_eof: bool) -> DecoderInput<'d, R> {
         let graceful_eof = graceful_eof && self.graceful_eof;
         DecoderInput(self, graceful_eof)
+    }
+
+    fn check_advance_pos(&self, n: u64) -> io::Result<()> {
+        if u64::MAX - self.pos < n {
+            Err(io::Error::new(
+                io::ErrorKind::Other,
+                "new position would be greater than u64::MAX"))
+        } else {
+            Ok(())
+        }
     }
 }
 
@@ -326,6 +338,8 @@ impl<R : Read> Decoder<R> {
 
     fn next_blob(&mut self) -> io::Result<Blob<R>> {
         let len = wire::decode_u64(&mut self.input(false))?;
+        self.check_advance_pos(len)?;
+
         self.blob_end = self.pos + len;
         Ok(Blob {
             decoder: self,
@@ -503,7 +517,7 @@ impl<'d, R : Seek + 'd> Seek for Blob<'d, R> {
 
         let pos = match pos {
             io::SeekFrom::Start(pos) => {
-                check!(pos <= self.len());
+                check!(pos <= self.len);
                 self.start_pos() + pos
             },
             io::SeekFrom::End(off) => {
