@@ -15,3 +15,4 @@ pub mod io;
 pub mod wire;
 pub mod stream;
 pub mod ser;
+pub mod des;

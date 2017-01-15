@@ -1003,15 +1003,16 @@ impl<'d, R : 'd> Blob<'d, R> {
     ///
     /// This does not consume the blob.
     ///
-    /// Returns `None` if the nominal length of the blob is larger than the
+    /// Returns `Err` if the nominal length of the blob is larger than the
     /// underlying slice.
-    pub fn slice(&self) -> Option<&[u8]> where R : AsRef<[u8]> {
+    pub fn slice(&self) -> Result<&[u8], &'static str>
+    where R : AsRef<[u8]> {
         let rem = self.remaining();
         let inner = self.stream.inner.as_ref();
         if rem <= (inner.len() as u64) {
-            Some(&inner[..(rem as usize)])
+            Ok(&inner[..(rem as usize)])
         } else {
-            None
+            Err("nominal blob length longer than input")
         }
     }
 
@@ -1021,13 +1022,17 @@ impl<'d, R : 'd> Blob<'d, R> {
     /// Unlike `slice()`, this does not hold a borrow on the `Blob` or even on
     /// the `Stream`.
     ///
-    /// Returns `None` if the nominal length of the blob is larger than the
+    /// Returns `Err` if the nominal length of the blob is larger than the
     /// underlying slice.
-    pub fn ext_slice<'a: 'd>(&mut self) -> Option<&'a [u8]>
+    pub fn ext_slice<'a>(&mut self) -> Result<&'a [u8], &'static str>
     where R : AsExtBytes<'a> {
         let remaining = self.remaining();
-        if remaining > (usize::MAX as u64) { return None; }
-        self.as_ext_bytes(remaining as usize)
+        if remaining > (usize::MAX as u64) {
+            Err("nominal blob length longer than usize::MAX")
+        } else {
+            self.as_ext_bytes(remaining as usize).ok_or(
+                "nominal blob length longer than input")
+        }
     }
 
     /// Returns a mutable reference to the unconsumed bytes in this blob.
@@ -1038,15 +1043,16 @@ impl<'d, R : 'd> Blob<'d, R> {
     /// this will not corrupt the underlying data (but will obviously modify
     /// it).
     ///
-    /// Returns `None` if the nominal length of the blob is larger than the
+    /// Returns `Err` if the nominal length of the blob is larger than the
     /// underlying slice.
-    pub fn slice_mut(&mut self) -> Option<&mut [u8]> where R : AsMut<[u8]> {
+    pub fn slice_mut(&mut self) -> Result<&mut [u8], &'static str>
+    where R : AsMut<[u8]> {
         let rem = self.remaining();
         let inner = self.stream.inner.as_mut();
         if rem <= (inner.len() as u64) {
-            Some(&mut inner[..(rem as usize)])
+            Ok(&mut inner[..(rem as usize)])
         } else {
-            None
+            Err("nominal blob length longer than input")
         }
     }
 
@@ -1175,7 +1181,7 @@ impl<'d, R : Seek + 'd> Seek for Blob<'d, R> {
     }
 }
 
-impl<'d, 'a: 'd, R : AsExtBytes<'a>> AsExtBytes<'a> for Blob<'d, R> {
+impl<'d, 'a, R : AsExtBytes<'a>> AsExtBytes<'a> for Blob<'d, R> {
     fn as_ext_bytes(&mut self, n: usize) -> Option<&'a [u8]> {
         if (n as u64) > self.remaining() { return None; }
         self.stream.inner.as_ext_bytes(n)
@@ -1750,8 +1756,8 @@ mod test {
             assert_eq!(1, field.tag);
             let blob = field.value.to_blob().unwrap();
             assert_eq!(11, blob.len());
-            assert!(blob.slice().is_none());
-            assert!(blob.slice_mut().is_none());
+            assert!(blob.slice().is_err());
+            assert!(blob.slice_mut().is_err());
         }
     }
 
