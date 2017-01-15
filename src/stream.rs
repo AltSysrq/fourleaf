@@ -108,6 +108,9 @@ pub struct Stream<R> {
     eof: bool,
     /// If there is a partially-consumed blob, the byte offset where it ends.
     blob_end: u64,
+    /// If there is an uncommitted dynamic blob, the byte offset where it
+    /// starts.
+    dynamic_blob_start: u64,
     /// Whether an EOF from the underlying input should be translated to an
     /// `EndOfDoc` descriptor.
     graceful_eof: bool,
@@ -250,6 +253,23 @@ impl<T : AsRef<[u8]>> Stream<TransparentCursor<T>> {
     }
 }
 
+macro_rules! write_int {
+    ($name:ident, $t:ty, $conv:ident, $t2:ty) => {
+        /// Writes a field with the given integer value to the output.
+        ///
+        /// ## Panics
+        ///
+        /// Panics if `tag` is not a valid field tag.
+        pub fn $name(&mut self, tag: u8, n: $t) -> io::Result<()>
+        where R : Write {
+            #[allow(unused_imports)]
+            use wire::zigzag;
+
+            self.write_u64(tag, $conv(n as $t2))
+        }
+    }
+}
+
 impl<R> Stream<R> {
     /// Create a new stream starting from byte offset 0.
     pub fn new(inner: R) -> Self {
@@ -258,6 +278,7 @@ impl<R> Stream<R> {
             pos: 0,
             eof: false,
             blob_end: 0,
+            dynamic_blob_start: 0,
             graceful_eof: false,
             seek: None,
             commit: None,
@@ -276,6 +297,7 @@ impl<R> Stream<R> {
             pos: 0,
             eof: false,
             blob_end: 0,
+            dynamic_blob_start: 0,
             graceful_eof: false,
             seek: Some(Nd(<R as Seek>::seek)),
             commit: None,
@@ -317,6 +339,13 @@ impl<R> Stream<R> {
     }
 
     /// Ensures the `Stream` is in a fully consistent state.
+    ///
+    /// It is usually not necessary to call this except in very particular
+    /// circumstances before closing a write stream, or when performing
+    /// operations at a level lower than the `Stream` abstraction.
+    ///
+    /// Calls to `Stream` which read or write data will implicitly commit
+    /// changes that occurred before that call.
     pub fn commit(&mut self) -> io::Result<()> {
         if let Some(Nd(f)) = self.commit {
             f(self)?;
@@ -443,7 +472,7 @@ impl<R> Stream<R> {
                 let message = blob.read_or_trunc(256)?;
                 return Err(io::Error::new(
                     io::ErrorKind::Other,
-                    format!("Error message in stream: {:?}",
+                    format!("error message in stream: {:?}",
                             String::from_utf8_lossy(&message[..]))));
             },
         }
@@ -554,6 +583,293 @@ impl<R> Stream<R> {
         }
         Ok(())
     }
+
+    /// Writes a field with the null value to the output.
+    ///
+    /// ## Panics
+    ///
+    /// Panics if `tag` is not a valid field tag.
+    pub fn write_null(&mut self, tag: u8) -> io::Result<()>
+    where R : Write {
+        self.write_desc(wire::ParsedDescriptor::Pair(
+            wire::DescriptorType::Null, tag))
+    }
+
+    /// Writes a field with the given integer value to the output.
+    ///
+    /// ## Panics
+    ///
+    /// Panics if `tag` is not a valid field tag.
+    pub fn write_u64(&mut self, tag: u8, n: u64) -> io::Result<()>
+    where R : Write {
+        self.write_desc(wire::ParsedDescriptor::Pair(
+            wire::DescriptorType::Integer, tag))?;
+        wire::encode_u64(&mut self.track(false), n)?;
+        Ok(())
+    }
+
+    write_int!(write_u8, u8, id, u64);
+    write_int!(write_i8, i8, zigzag, i64);
+    write_int!(write_u16, u16, id, u64);
+    write_int!(write_i16, i16, zigzag, i64);
+    write_int!(write_u32, u32, id, u64);
+    write_int!(write_i32, i32, zigzag, i64);
+    write_int!(write_i64, i64, zigzag, i64);
+    write_int!(write_usize, usize, id, u64);
+    write_int!(write_isize, isize, zigzag, i64);
+
+    /// Writes a field with the given boolean value to the output.
+    ///
+    /// ## Panics
+    ///
+    /// Panics if `tag` is not a valid field tag.
+    pub fn write_bool(&mut self, tag: u8, b: bool) -> io::Result<()>
+    where R : Write {
+        self.write_u64(tag, b as u64)
+    }
+
+    /// Writes a blob field with the given byte content to the output.
+    ///
+    /// The new blob is returned, positioned at the end. The caller is free to
+    /// seek on the blob, but must restore the position to the end before
+    /// attempting to continue using the `Stream`.
+    ///
+    /// ## Panics
+    ///
+    /// Panics if `tag` is not a valid field tag.
+    pub fn write_blob_data<D : AsRef<[u8]>>(&mut self, tag: u8, data: D)
+                                            -> io::Result<Blob<R>>
+    where R : Write {
+        let data = data.as_ref();
+        let mut blob = self.write_blob_alloc(tag, data.len() as u64)?;
+        blob.write_all(data)?;
+        Ok(blob)
+    }
+
+    /// Writes the header for a blob field with the given length to the output.
+    ///
+    /// The new blob is returned, positioned at the beginning. The caller must
+    /// advance the position to the end of the blob and leave the position at
+    /// the end before continuing to use the `Stream`.
+    ///
+    /// ## Panics
+    ///
+    /// Panics if `tag` is not a valid field tag.
+    pub fn write_blob_alloc(&mut self, tag: u8, len: u64)
+                            -> io::Result<Blob<R>>
+    where R : Write {
+        self.write_desc_with_blob_alloc(wire::ParsedDescriptor::Pair(
+            wire::DescriptorType::Blob, tag), len)
+    }
+
+    fn write_desc_with_blob_alloc(&mut self, desc: wire::ParsedDescriptor,
+                                  len: u64) -> io::Result<Blob<R>>
+    where R : Write {
+        // 10 bytes length + 1 byte tag
+        const OVERHEAD: u64 = 11;
+
+        self.commit()?;
+
+        if len > u64::MAX - OVERHEAD {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidInput,
+                "blob length too long"));
+        }
+
+        self.check_advance_pos(len + OVERHEAD)?;
+        self.write_desc(desc)?;
+        wire::encode_u64(&mut self.track(false), len)?;
+
+        self.blob_end = self.pos + len;
+        self.commit = Some(Nd(Self::check_at_end_of_blob));
+        Ok(Blob {
+            stream: self,
+            len: len,
+        })
+    }
+
+    fn check_at_end_of_blob(&mut self) -> io::Result<()> {
+        if self.pos != self.blob_end {
+            Err(io::Error::new(io::ErrorKind::InvalidInput,
+                               "blob not fully written, or position seeked \
+                                away from end of blob"))
+        } else {
+            Ok(())
+        }
+    }
+
+    /// Writes the header for a blob field with unknown length to the output.
+    ///
+    /// The new blob is returned, positioned at the beginning. The caller must
+    /// write the desired data to the blob, and then cause the `Stream` to be
+    /// committed, either by calling `commit()` or by using another read or
+    /// write function.
+    ///
+    /// This function operates by initially nominally allocating the maximum
+    /// possible size for the blob and returning that. When the `Stream`
+    /// commits, it uses the current position to determine the actual size of
+    /// the blob, then seeks back to the blob header and writes the real length
+    /// in, then seeks back to the end of the blob to continue operation.
+    ///
+    /// Because the length is written after the blob, the length must be in
+    /// fixed-width format, which may incur up to 9 bytes of overhead. Because
+    /// of this and of the overhead of multiple seeks, this should only be used
+    /// for blobs which are not reasonable to buffer otherwise.
+    ///
+    /// It is unspecified what the result is if the caller writes the dynamic
+    /// blob but then seeks the position to an earlier point of the blob and
+    /// leaves position there.
+    ///
+    /// ## Panics
+    ///
+    /// Panics if `tag` is not a valid field tag.
+    pub fn write_blob_dynamic(&mut self, tag: u8) -> io::Result<Blob<R>>
+    where R : Write + Seek {
+        self.write_desc_with_blob_dynamic(wire::ParsedDescriptor::Pair(
+            wire::DescriptorType::Blob, tag))
+    }
+
+    fn write_desc_with_blob_dynamic(&mut self, desc: wire::ParsedDescriptor)
+                                    -> io::Result<Blob<R>>
+    where R : Write + Seek {
+        self.write_desc(desc)?;
+        let len = u64::MAX - self.pos - 10;
+        wire::encode_fixed_u64(&mut self.track(false), len)?;
+
+        self.dynamic_blob_start = self.pos;
+        self.blob_end = self.pos + len;
+        self.commit = Some(Nd(Self::finish_dynamic_blob));
+        Ok(Blob {
+            stream: self,
+            len: len,
+        })
+    }
+
+    fn finish_dynamic_blob(&mut self) -> io::Result<()>
+    where R : Write + Seek {
+        let blob_start = self.dynamic_blob_start;
+        let blob_end = self.pos;
+        if self.pos < blob_start {
+            return Err(io::Error::new(
+                io::ErrorKind::Other,
+                "position moved before dynamic blob start"));
+        }
+
+        let header = blob_start - 10;
+        let displacement = self.pos - header;
+        if displacement > (i64::MAX as u64) {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidInput,
+                "dynamic blob length exceeded i64::MAX"));
+        }
+
+        self.inner.seek(io::SeekFrom::Current(-(displacement as i64)))?;
+        self.pos -= displacement;
+        wire::encode_fixed_u64(&mut self.track(false), blob_end - blob_start)?;
+        self.inner.seek(io::SeekFrom::Current((blob_end - blob_start) as i64))?;
+        self.pos = blob_end;
+        Ok(())
+    }
+
+    /// Writes a struct field to the output.
+    ///
+    /// The body of the struct can be constructed by continuing to make calls
+    /// to the `write_*` methods of this `Stream`, and terminated with the
+    /// `write_end_struct` method.
+    ///
+    /// ## Panics
+    ///
+    /// Panics if `tag` is not a valid field tag.
+    pub fn write_struct(&mut self, tag: u8) -> io::Result<()>
+    where R : Write {
+        self.write_desc(wire::ParsedDescriptor::Pair(
+            wire::DescriptorType::Struct, tag))
+    }
+
+    /// Writes an end-of-struct element to the output.
+    pub fn write_end_struct(&mut self) -> io::Result<()>
+    where R : Write {
+        self.write_desc(wire::ParsedDescriptor::Special(
+            wire::SpecialType::EndOfStruct))
+    }
+
+    /// Writes an end-of-document element to the output.
+    pub fn write_end_doc(&mut self) -> io::Result<()>
+    where R : Write {
+        self.write_desc(wire::ParsedDescriptor::Special(
+            wire::SpecialType::EndOfDoc))
+    }
+
+    /// Writes an exception to the output whose content is the given byte
+    /// slice.
+    ///
+    /// The semantics of the blob itself are the same as for `write_blob_data`.
+    pub fn write_exception_data<D : AsRef<[u8]>>(&mut self, data: D)
+                                                 -> io::Result<Blob<R>>
+    where R : Write {
+        let data = data.as_ref();
+        let mut blob = self.write_exception_alloc(data.len() as u64)?;
+        blob.write_all(data)?;
+        Ok(blob)
+    }
+
+    /// Writes the header for an exception with the given data length to the
+    /// output.
+    ///
+    /// The semantics of the blob itself are the same as for
+    /// `write_blob_alloc`.
+    pub fn write_exception_alloc(&mut self, len: u64)
+                                 -> io::Result<Blob<R>>
+    where R : Write {
+        self.write_desc_with_blob_alloc(wire::ParsedDescriptor::Special(
+            wire::SpecialType::Exception), len)
+    }
+
+    /// Writes the header for an exception whose data length is unknown to the
+    /// output.
+    ///
+    /// The semantics of the blob itself are the same as for
+    /// `write_blob_dynamic`.
+    pub fn write_exception_dynamic(&mut self) -> io::Result<Blob<R>>
+    where R : Write + Seek {
+        self.write_desc_with_blob_dynamic(wire::ParsedDescriptor::Special(
+            wire::SpecialType::Exception))
+    }
+
+    /// Writes a padding element to the output.
+    pub fn write_padding(&mut self) -> io::Result<()>
+    where R : Write {
+        self.write_desc(wire::ParsedDescriptor::Special(
+            wire::SpecialType::Padding))
+    }
+
+    /// Writes padding bytes to the output until the position of this `Stream`
+    /// is a multiple of `alignment`.
+    ///
+    /// If the position is already a multiple of `alignment`, nothing is
+    /// written, but the effect of a call to `commit()` happens regardless.
+    ///
+    /// `alignment` must be a power of two.
+    pub fn pad_to_align(&mut self, align: u64) -> io::Result<()>
+    where R : Write {
+        debug_assert!(0 == (align & (align - 1)),
+                      "`fourleaf::stream::Stream::pad_to_align()` called with \
+                       non-power-of-two alignment {}", align);
+        // For consistency, always commit.
+        self.commit()?;
+
+        while 0 != (self.pos & (align - 1)) {
+            self.write_padding()?;
+        }
+        Ok(())
+    }
+
+    fn write_desc(&mut self, desc: wire::ParsedDescriptor) -> io::Result<()>
+    where R : Write {
+        self.commit()?;
+        wire::encode_descriptor(&mut self.track(false),
+                                wire::Descriptor::from(desc))
+    }
 }
 
 impl<R : BufRead> Stream<R> {
@@ -616,7 +932,7 @@ impl<'d, R : 'd> Blob<'d, R> {
         if self.remaining() > (max as u64) {
             return Err(io::Error::new(
                 io::ErrorKind::InvalidData,
-                "Blob length longer than maximum size"));
+                "blob length longer than maximum size"));
         }
 
         let mut ret = Vec::new();
@@ -1373,5 +1689,155 @@ mod test {
             assert_eq!(13, field.pos);
             field.value.to_null().unwrap();
         }
+    }
+
+    #[test]
+    fn write_scalars() {
+        let mut enc = Stream::new(Vec::<u8>::new());
+        enc.write_null(1).unwrap();
+        assert_eq!(1, enc.pos());
+        enc.write_u64(2, 42).unwrap();
+        assert_eq!(3, enc.pos());
+        enc.write_struct(3).unwrap();
+        assert_eq!(4, enc.pos());
+        enc.write_end_struct().unwrap();
+        assert_eq!(5, enc.pos());
+        enc.write_end_doc().unwrap();
+        assert_eq!(6, enc.pos());
+        enc.write_padding().unwrap();
+
+        let data = enc.into_inner();
+        let expected = parse("01 42 2A C3 00 40 C0");
+        assert_eq!(expected, data);
+    }
+
+    #[test]
+    fn write_integers() {
+        let mut enc = Stream::new(Vec::new());
+        enc.write_bool(1, false).unwrap();
+        enc.write_bool(1, true).unwrap();
+        enc.write_u8(2, 8).unwrap();
+        enc.write_i8(3, 8).unwrap();
+        enc.write_u16(4, 16).unwrap();
+        enc.write_i16(5, 16).unwrap();
+        enc.write_u32(6, 32).unwrap();
+        enc.write_i32(7, 32).unwrap();
+        enc.write_usize(8, 48).unwrap();
+        enc.write_isize(9, 48).unwrap();
+        enc.write_u64(10, 64).unwrap();
+        enc.write_i64(11, 64).unwrap();
+
+        let mut dec = Stream::new(io::Cursor::new(enc.into_inner()));
+        macro_rules! assert_int {
+            ($tag:expr, $expected:expr, $meth:ident) => { {
+                let field = dec.next_field().unwrap().unwrap();
+                assert_eq!($tag, field.tag);
+                assert_eq!($expected, field.value.$meth().unwrap());
+            } }
+        }
+        assert_int!(1, false, to_bool);
+        assert_int!(1, true, to_bool);
+        assert_int!(2, 8, to_u8);
+        assert_int!(3, 8, to_i8);
+        assert_int!(4, 16, to_u16);
+        assert_int!(5, 16, to_i16);
+        assert_int!(6, 32, to_u32);
+        assert_int!(7, 32, to_i32);
+        assert_int!(8, 48, to_usize);
+        assert_int!(9, 48, to_isize);
+        assert_int!(10, 64, to_u64);
+        assert_int!(11, 64, to_i64);
+    }
+
+    #[test]
+    fn write_direct_blob() {
+        let mut enc = Stream::new(Vec::<u8>::new());
+        enc.write_blob_data(1, "hello world").unwrap();
+        assert_eq!(13, enc.pos());
+        enc.write_exception_data("plugh").unwrap();
+        assert_eq!(20, enc.pos());
+        enc.write_end_doc().unwrap();
+        assert_eq!(21, enc.pos());
+
+        let data = enc.into_inner();
+        let expected = parse("81 0B 'hello world' 80 05 'plugh' 40");
+        assert_eq!(expected, data);
+    }
+
+    #[test]
+    fn write_alloc_blob() {
+        let mut enc = Stream::new(Vec::<u8>::new());
+        {
+            let mut blob = enc.write_blob_alloc(1, 11).unwrap();
+            write!(blob, "hello {}", "world").unwrap();
+        }
+        {
+            let mut blob = enc.write_exception_alloc(5).unwrap();
+            write!(blob, "plugh").unwrap();
+        }
+        enc.write_end_doc().unwrap();
+
+        let data = enc.into_inner();
+        let expected = parse("81 0B 'hello world' 80 05 'plugh' 40");
+        assert_eq!(expected, data);
+    }
+
+    #[test]
+    fn write_alloc_dynamic() {
+        let mut enc = Stream::new(io::Cursor::new(Vec::new()));
+        {
+            let mut blob = enc.write_blob_dynamic(1).unwrap();
+            write!(blob, "hello {}", "world").unwrap();
+        }
+        {
+            let mut blob = enc.write_exception_dynamic().unwrap();
+            write!(blob, "plugh").unwrap();
+        }
+        enc.write_end_doc().unwrap();
+
+        let data = enc.into_inner().into_inner();
+        let expected = parse("81 8B808080808080808000 'hello world' \
+                              80 85808080808080808000 'plugh' 40");
+        assert_eq!(expected, data);
+    }
+
+    #[test]
+    fn incomplete_alloc_blob_fails() {
+        let mut enc = Stream::new(Vec::new());
+        {
+            let mut blob = enc.write_blob_alloc(1, 11).unwrap();
+            write!(blob, "plugh").unwrap();
+        }
+        assert!(enc.write_end_doc().is_err());
+    }
+
+    #[test]
+    #[should_panic]
+    fn write_tag_zero_panics() {
+        let mut enc = Stream::new(Vec::new());
+        let _ = enc.write_null(0);
+    }
+
+    #[test]
+    #[should_panic]
+    fn write_tag_too_large_panics() {
+        let mut enc = Stream::new(Vec::new());
+        let _ = enc.write_null(64);
+    }
+
+    #[test]
+    fn write_padding_to_alignment() {
+        let mut enc = Stream::new(Vec::new());
+        enc.pad_to_align(4).unwrap();
+        enc.write_null(1).unwrap();
+        enc.pad_to_align(4).unwrap();
+        enc.write_null(1).unwrap();
+        enc.pad_to_align(2).unwrap();
+        enc.write_null(1).unwrap();
+        enc.pad_to_align(8).unwrap();
+
+        let data = enc.into_inner();
+        let expected = parse("01 C0 C0 C0 01 C0 01 C0");
+        assert_eq!(expected, data);
     }
 }
