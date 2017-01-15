@@ -7,7 +7,7 @@
 // option. This file may not be copied, modified, or distributed
 // except according to those terms.
 
-//! Specialised traits for doing IO.
+//! Specialised adapters for doing IO.
 
 use std::io::{self, BufRead, Read, Seek, Write};
 
@@ -69,3 +69,36 @@ impl<T : AsMut<[u8]>> AsMut<[u8]> for TransparentCursor<T> {
     }
 }
 
+/// Like `AsRef<[T]>`, but the lifetime of the slice is independent of `self`.
+pub trait AsExtBytes<'a> {
+    /// Returns a reference to the first `n` bytes of this buffer.
+    ///
+    /// Returns `None` if `n` is greater than the length of this buffer.
+    fn as_ext_bytes(&mut self, n: usize) -> Option<&'a [u8]>;
+}
+
+impl<'a> AsExtBytes<'a> for &'a [u8] {
+    fn as_ext_bytes(&mut self, n: usize) -> Option<&'a [u8]> {
+        if n > self.len() { return None; }
+        Some(&self[..n])
+    }
+}
+
+impl<'a> AsExtBytes<'a> for io::Cursor<&'a [u8]> {
+    fn as_ext_bytes(&mut self, n: usize) -> Option<&'a [u8]> {
+        let buf: &'a [u8] = *self.get_ref();
+        let buf = &buf[(self.position() as usize)..];
+
+        if n > buf.len() {
+            None
+        } else {
+            Some(&buf[..n])
+        }
+    }
+}
+
+impl<'a> AsExtBytes<'a> for TransparentCursor<&'a [u8]> {
+    fn as_ext_bytes(&mut self, n: usize) -> Option<&'a [u8]> {
+        self.0.as_ext_bytes(n)
+    }
+}

@@ -15,7 +15,7 @@ use std::fmt;
 use std::io::{self, BufRead, Read, Seek, Write};
 use std::{i8, u8, i16, u16, i32, u32, i64, u64, isize, usize};
 
-use io::TransparentCursor;
+use io::{AsExtBytes, TransparentCursor};
 use wire::{self, DescriptorType, ParsedDescriptor, SpecialType};
 
 #[derive(Clone, Copy)]
@@ -191,6 +191,8 @@ impl<'d, W : Write> Write for StreamTracker<'d, W> {
 
 impl<T : AsRef<[u8]>> Stream<TransparentCursor<T>> {
     /// Create a new stream which decodes the given slice.
+    ///
+    /// To use the most flexible zero-copy APIs, `t` should be a `&[u8]`.
     pub fn from_slice(t: T) -> Self {
         Self::new_seek(TransparentCursor(io::Cursor::new(t)))
     }
@@ -896,16 +898,14 @@ impl<'d, R : 'd> Blob<'d, R> {
         self.take(max as u64).read_to_end(&mut ret)?;
         Ok(ret)
     }
-}
 
-impl<'d, R : AsRef<[u8]> + 'd> Blob<'d, R> {
     /// Returns a reference to the unconsumed bytes in this blob.
     ///
     /// This does not consume the blob.
     ///
     /// Returns `None` if the nominal length of the blob is larger than the
     /// underlying slice.
-    pub fn slice(&self) -> Option<&[u8]> {
+    pub fn slice(&self) -> Option<&[u8]> where R : AsRef<[u8]> {
         let rem = self.remaining();
         let inner = self.stream.inner.as_ref();
         if rem <= (inner.len() as u64) {
@@ -914,9 +914,22 @@ impl<'d, R : AsRef<[u8]> + 'd> Blob<'d, R> {
             None
         }
     }
-}
 
-impl<'d, R : AsMut<[u8]> + 'd> Blob<'d, R> {
+    /// Returns a reference to the rest of the unconsumed bytes in this blob,
+    /// consuming them.
+    ///
+    /// Unlike `slice()`, this does not hold a borrow on the `Blob` or even on
+    /// the `Stream`.
+    ///
+    /// Returns `None` if the nominal length of the blob is larger than the
+    /// underlying slice.
+    pub fn ext_slice<'a: 'd>(&mut self) -> Option<&'a [u8]>
+    where R : AsExtBytes<'a> {
+        let remaining = self.remaining();
+        if remaining > (usize::MAX as u64) { return None; }
+        self.as_ext_bytes(remaining as usize)
+    }
+
     /// Returns a mutable reference to the unconsumed bytes in this blob.
     ///
     /// This does not consume the blob.
@@ -924,7 +937,10 @@ impl<'d, R : AsMut<[u8]> + 'd> Blob<'d, R> {
     /// The caller is free to manipulate the content of the blob arbitrarily;
     /// this will not corrupt the underlying data (but will obviously modify
     /// it).
-    pub fn slice_mut(&mut self) -> Option<&mut [u8]> {
+    ///
+    /// Returns `None` if the nominal length of the blob is larger than the
+    /// underlying slice.
+    pub fn slice_mut(&mut self) -> Option<&mut [u8]> where R : AsMut<[u8]> {
         let rem = self.remaining();
         let inner = self.stream.inner.as_mut();
         if rem <= (inner.len() as u64) {
@@ -1039,6 +1055,14 @@ impl<'d, R : Seek + 'd> Seek for Blob<'d, R> {
     }
 }
 
+impl<'d, 'a: 'd, R : AsExtBytes<'a>> AsExtBytes<'a> for Blob<'d, R> {
+    fn as_ext_bytes(&mut self, n: usize) -> Option<&'a [u8]> {
+        if (n as u64) > self.remaining() { return None; }
+        self.stream.inner.as_ext_bytes(n)
+    }
+}
+
+
 macro_rules! to_int {
     ($meth:ident -> $t:ident, $zz:ident -> $long:ty) => {
         /// If this value is an integer, adjust it for signedness, check that
@@ -1136,6 +1160,7 @@ mod test {
     use std::io::{self, BufRead, Read, Seek, Write};
     use std::str;
 
+    use io::AsExtBytes;
     use super::*;
 
     fn parse(text: &str) -> Vec<u8> {
@@ -1632,6 +1657,46 @@ mod test {
             assert_eq!(13, field.pos);
             field.value.to_null().unwrap();
         }
+    }
+
+    #[test]
+    fn blob_zero_copy() {
+        let data = parse("81 0B 'hello world' 82 05 'plugh'");
+        let (hw, plugh) = {
+            let mut dec = Stream::from_slice(&data[..]);
+            let hw = {
+                let mut field = dec.next_field().unwrap().unwrap();
+                assert_eq!(1, field.tag);
+                let blob = field.value.to_blob().unwrap();
+
+                blob.ext_slice().unwrap()
+            };
+
+            let plugh = {
+                let mut field = dec.next_field().unwrap().unwrap();
+                assert_eq!(2, field.tag);
+                let blob = field.value.to_blob().unwrap();
+                blob.ext_slice().unwrap()
+            };
+
+            (hw, plugh)
+        };
+
+        assert_eq!(b"hello world", hw);
+        assert_eq!(b"plugh", plugh);
+    }
+
+    #[test]
+    fn blob_ext_bytes_prevents_read_past_end() {
+        let data = parse("81 0B 'hello world' 02");
+        let mut dec = Stream::from_slice(&data[..]);
+        let mut field = dec.next_field().unwrap().unwrap();
+        assert_eq!(1, field.tag);
+        let blob = field.value.to_blob().unwrap();
+        assert!(blob.as_ext_bytes(12).is_none());
+        blob.read_or_trunc(6).unwrap();
+        assert_eq!(b"world", blob.ext_slice().unwrap());
+        assert!(blob.as_ext_bytes(6).is_none());
     }
 
     #[test]
