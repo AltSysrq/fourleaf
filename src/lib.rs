@@ -7,8 +7,11 @@
 // option. This file may not be copied, modified, or distributed
 // except according to those terms.
 
-#[deny(missing_docs)]
+//! TODO
+
+#![deny(missing_docs)]
 
 pub mod io;
 pub mod wire;
 pub mod stream;
+pub mod ser;
