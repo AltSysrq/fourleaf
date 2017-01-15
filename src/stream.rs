@@ -815,6 +815,45 @@ impl<R> Stream<R> {
         wire::encode_descriptor(&mut self.track(false),
                                 wire::Descriptor::from(desc))
     }
+
+    /// Writes the given element to this stream.
+    ///
+    /// This is useful for copying from one `Stream` to another. For other
+    /// uses, prefer calling the direct functions instead of constructing
+    /// `Element`s programatically.
+    pub fn write_element<I>(&mut self, e: &mut Element<I>) -> io::Result<()>
+    where R : Write, I : Read {
+        match *e {
+            Element::Field(ref mut f) => self.write_field(f),
+            Element::EndOfStruct => self.write_end_struct(),
+            Element::EndOfDoc => self.write_end_doc(),
+            Element::Padding => self.write_padding(),
+            Element::Exception(ref mut src) => {
+                let mut dst = self.write_exception_alloc(src.len())?;
+                io::copy(src, &mut dst)?;
+                Ok(())
+            },
+        }
+    }
+
+    /// Writes the given field to this stream.
+    ///
+    /// This is useful for copying from one `Stream` to another. For other
+    /// uses, prefer calling the direct functions instead of constructing
+    /// `Field`s programatically.
+    pub fn write_field<I>(&mut self, f: &mut Field<I>) -> io::Result<()>
+    where R : Write, I : Read {
+        match f.value {
+            Value::Null => self.write_null(f.tag),
+            Value::Integer(i) => self.write_u64(f.tag, i),
+            Value::Struct => self.write_struct(f.tag),
+            Value::Blob(ref mut src) => {
+                let mut dst = self.write_blob_alloc(f.tag, src.len())?;
+                io::copy(src, &mut dst)?;
+                Ok(())
+            },
+        }
+    }
 }
 
 impl<R : BufRead> Stream<R> {
