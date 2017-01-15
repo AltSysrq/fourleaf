@@ -12,8 +12,61 @@
 use std::fmt;
 use std::io::Read;
 
+use quick_error::ResultExt;
+
 use io::AsExtBytes;
-use stream::{self, Result};
+use stream;
+
+quick_error! {
+    /// Errors that can be produced during deserialisation.
+    ///
+    /// Every variant begins with a string indicating the field names and
+    /// positions that led to the error, including the problematic field
+    /// itself.
+    #[derive(Debug)]
+    pub enum Error {
+        /// An error was returned by the underlying `Stream`.
+        Stream(wo: String, err: stream::Error) {
+            description(err.description())
+            display("{} at {}", err, wo)
+            cause(err)
+            context(wo: &'a Context<'a>, err: stream::Error) ->
+                (wo.to_string(), err)
+        }
+        /// Deserialisation recursed too deeply.
+        ///
+        /// See `Config::recursion_limit` to control the cut-off point.
+        RecursionLimitExceeded(wo: String) {
+            description("recursion limit exceeded")
+            display("recursion limit exceeded at {}", wo)
+        }
+        /// An unknown field was encountered and
+        /// `Config::ignore_unknown_fields` was false.
+        UnknownField(wo: String, tag: u8, pos: u64) {
+            description("unknown field encountered")
+            display("unknown field {} encountered at {}.{{{}}}", tag, wo, pos)
+        }
+        /// A field was encountered more times than is permitted. This error is
+        /// flagged at the first occurrence that exceeds the maximum.
+        FieldOccursTooManyTimes(wo: String, max: u64) {
+            description("too many occurrences of field")
+            display("too many occurrences (max {}) of field at {}", max, wo)
+        }
+        /// A field which is required in a structure was not found by the time
+        /// the end of the structure was reached. This error is flagged at the
+        /// end of the structure, but includes the name of the missing field in
+        /// the location.
+        RequiredFieldMissing(wo: String) {
+            description("required field missing")
+            display("required field missing at {}", wo)
+        }
+        #[allow(missing_docs)]
+        #[doc(hidden)]
+        _NonExhaustive
+    }
+}
+
+type Result<T> = ::std::result::Result<T, Error>;
 
 /// Run-time configuration for deserialisation.
 #[derive(Debug, Clone)]
@@ -66,7 +119,7 @@ impl<'a> Context<'a> {
     /// it does not exceed the recursion limit.
     pub fn push(&'a self, field: &'a str, pos: u64) -> Result<Self> {
         if self.depth >= self.config.recursion_limit {
-            panic!("TODO return an error")
+            Err(Error::RecursionLimitExceeded(self.to_string()))
         } else {
             Ok(Context {
                 next: Some(self),
@@ -85,7 +138,7 @@ impl<'a> Context<'a> {
         if self.config.ignore_unknown_fields {
             Ok(())
         } else {
-            panic!("TODO return an error")
+            Err(Error::UnknownField(self.to_string(), field.tag, field.pos))
         }
     }
 }
@@ -109,7 +162,7 @@ macro_rules! des_struct_body {
             let mut $field =
                 <<$t as Deserialize<R, STYLE>>::Accum as Default>::default();
         )*
-        while let Some(mut field) = $stream.next_field()? {
+         while let Some(mut field) = $stream.next_field().context($context)? {
             match field.tag {
                 $(
                     $tag => {
@@ -222,7 +275,8 @@ where T : UnaryDeserialize<R, STYLE> {
                          field: &mut stream::Field<R>)
                          -> Result<()> {
         if accum.is_some() {
-            panic!("TODO return an error")
+            return Err(Error::FieldOccursTooManyTimes(
+                context.to_string(), 1));
         }
 
         *accum = Some(T::deserialize_unary(context, field)?);
@@ -230,14 +284,15 @@ where T : UnaryDeserialize<R, STYLE> {
     }
 
     fn finish(accum: Option<T>, context: &Context) -> Result<T> {
-        accum.ok_or_else(|| panic!("TODO return an error"))
+        accum.ok_or_else(|| Error::RequiredFieldMissing(
+            context.to_string()))
     }
 }
 
 impl<R : Read, STYLE> UnaryDeserialize<R, STYLE> for () {
     fn deserialize_unary(context: &Context, field: &mut stream::Field<R>)
                          -> Result<()> {
-        field.value.to_null()
+        Ok(field.value.to_null().context(context)?)
     }
 }
 
@@ -245,6 +300,7 @@ impl<'a, R : Read + AsExtBytes<'a>> UnaryDeserialize<R, style::ZeroCopy>
 for &'a [u8] {
     fn deserialize_unary(context: &Context, field: &mut stream::Field<R>)
                          -> Result<&'a [u8]> {
-        field.value.to_blob().and_then(|b| b.ext_slice())
+        Ok(field.value.to_blob().and_then(|b| b.ext_slice())
+           .context(context)?)
     }
 }

@@ -228,7 +228,6 @@ pub fn encode_descriptor<W : Write>(w: &mut W, desc: Descriptor)
 
 #[cfg(test)]
 mod test {
-    use std::io;
     use std::{i64, u64};
 
     use stream::Error;
