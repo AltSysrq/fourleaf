@@ -7,6 +7,8 @@
 // option. This file may not be copied, modified, or distributed
 // except according to those terms.
 
+#[deny(missing_docs)]
+
 #[macro_use] extern crate enum_primitive;
 extern crate num_traits;
 
