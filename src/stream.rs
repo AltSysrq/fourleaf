@@ -115,7 +115,10 @@ pub enum Value<'d, R : 'd> {
     /// handle the struct, and from there continuing to use `next_value` on the
     /// `Stream` until it returns `None` to indicate the end of the child
     /// struct.
-    Struct,
+    ///
+    /// This contains a reference back to the `Stream` that read the tag to
+    /// simplify recursive deserialisers.
+    Struct(&'d mut Stream<R>),
 }
 
 /// A handle to a blob within the fourleaf stream.
@@ -542,7 +545,7 @@ impl<R> Stream<R> {
             DescriptorType::Integer => Value::Integer(
                 wire::decode_u64(&mut self.track(false))?),
             DescriptorType::Blob => Value::Blob(self.next_blob()?),
-            DescriptorType::Struct => Value::Struct,
+            DescriptorType::Struct => Value::Struct(self),
         })
     }
 
@@ -894,7 +897,7 @@ impl<R> Stream<R> {
         match f.value {
             Value::Null => self.write_null(f.tag),
             Value::Integer(i) => self.write_u64(f.tag, i),
-            Value::Struct => self.write_struct(f.tag),
+            Value::Struct(..) => self.write_struct(f.tag),
             Value::Blob(ref mut src) => {
                 let mut dst = self.write_blob_alloc(f.tag, src.len())?;
                 io::copy(src, &mut dst)?;
@@ -1193,8 +1196,8 @@ macro_rules! to_int {
 
             match *self {
                 Value::Null => Err("expected Integer, got Null"),
-                Value::Blob(_) => Err("expected Integer, got Blob"),
-                Value::Struct => Err("expected Integer, got Struct"),
+                Value::Blob(..) => Err("expected Integer, got Blob"),
+                Value::Struct(..) => Err("expected Integer, got Struct"),
                 Value::Integer(v) => {
                     let v = $zz(v);
                     if v < ($t::MIN as $long) {
@@ -1219,20 +1222,20 @@ impl<'d, R : 'd> Value<'d, R> {
     pub fn to_null(&self) -> Result<(), &'static str> {
         match *self {
             Value::Null => Ok(()),
-            Value::Integer(_) => Err("expected Null, got Integer"),
-            Value::Blob(_) => Err("expected Null, got Blob"),
-            Value::Struct => Err("expected Null, got Struct"),
+            Value::Integer(..) => Err("expected Null, got Integer"),
+            Value::Blob(..) => Err("expected Null, got Blob"),
+            Value::Struct(..) => Err("expected Null, got Struct"),
         }
     }
 
-    /// If this value is a Struct, return `()`. Otherwise, return an error
-    /// message.
-    pub fn to_struct(&self) -> Result<(), &'static str> {
+    /// If this value is a Struct, return the source stream. Otherwise, return
+    /// an error message.
+    pub fn to_struct(&mut self) -> Result<&mut Stream<R>, &'static str> {
         match *self {
-            Value::Struct => Ok(()),
+            Value::Struct(ref mut s) => Ok(s),
             Value::Null => Err("expected Struct, got Null"),
-            Value::Integer(_) => Err("expected Struct, got Integer"),
-            Value::Blob(_) => Err("expected Struct, got Blob"),
+            Value::Integer(..) => Err("expected Struct, got Integer"),
+            Value::Blob(..) => Err("expected Struct, got Blob"),
         }
     }
 
@@ -1266,8 +1269,8 @@ impl<'d, R : 'd> Value<'d, R> {
         match *self {
             Value::Blob(ref mut b) => Ok(b),
             Value::Null => Err("expected Blob, got Null"),
-            Value::Integer(_) => Err("expected Blob, got Integer"),
-            Value::Struct => Err("expected Blob, got Struct"),
+            Value::Integer(..) => Err("expected Blob, got Integer"),
+            Value::Struct(..) => Err("expected Blob, got Struct"),
         }
     }
 }
@@ -1469,20 +1472,20 @@ mod test {
         let mut dec = stream("C1 C2 00 C3 00 00");
 
         {
-            let field = dec.next_field().unwrap().unwrap();
+            let mut field = dec.next_field().unwrap().unwrap();
             assert_eq!(1, field.tag);
             assert_eq!(0, field.pos);
             field.value.to_struct().unwrap();
         }
         {
-            let field = dec.next_field().unwrap().unwrap();
+            let mut field = dec.next_field().unwrap().unwrap();
             assert_eq!(2, field.tag);
             assert_eq!(1, field.pos);
             field.value.to_struct().unwrap();
         }
         assert!(dec.next_field().unwrap().is_none());
         {
-            let field = dec.next_field().unwrap().unwrap();
+            let mut field = dec.next_field().unwrap().unwrap();
             assert_eq!(3, field.tag);
             assert_eq!(3, field.pos);
             field.value.to_struct().unwrap();
@@ -1496,7 +1499,7 @@ mod test {
         let mut dec = stream("C1 40 02");
 
         {
-            let field = dec.next_field().unwrap().unwrap();
+            let mut field = dec.next_field().unwrap().unwrap();
             field.value.to_struct().unwrap();
         }
         assert!(dec.next_field().unwrap().is_none());
