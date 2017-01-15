@@ -308,6 +308,30 @@ impl<R> Stream<R> {
         self.inner
     }
 
+    /// Borrows a reference to the underlying byte stream.
+    ///
+    /// This is mainly intended for things like syncing a file handle. If the
+    /// intent is to do things that depend on the stream position, consider
+    /// whether `commit()` should be called (depending on whether being in the
+    /// middle of a blob is reasonable/desired). If the use of the byte stream
+    /// causes the stream to be repositioned, ensure that `set_pos()` is later
+    /// called to inform the `Stream` of this fact.
+    pub fn get_ref(&self) -> &R {
+        &self.inner
+    }
+
+    /// Borrows a reference to the underlying byte stream.
+    ///
+    /// This is mainly intended for things like syncing a file handle. If the
+    /// intent is to do things that depend on the stream position, consider
+    /// whether `commit()` should be called (depending on whether being in the
+    /// middle of a blob is reasonable/desired). If the use of the byte stream
+    /// causes the stream to be repositioned, ensure that `set_pos()` is later
+    /// called to inform the `Stream` of this fact.
+    pub fn get_mut(&mut self) -> &mut R {
+        &mut self.inner
+    }
+
     /// Returns the current byte offset of the stream.
     pub fn pos(&self) -> u64 {
         self.pos
@@ -316,11 +340,11 @@ impl<R> Stream<R> {
     /// Changes the stream's current conception of the position in the byte
     /// stream.
     ///
-    /// This should only be used if some operation outside the stream's
-    /// control caused the position of the byte stream to actually change, as
-    /// the stream will assume that other positions it maintains are still
-    /// valid. It may also be used immediately after construction to change the
-    /// starting offset value.
+    /// This should only be used if some operation outside the `Stream`'s
+    /// control caused the position of the byte stream to actually change
+    /// (e.g., via use of `get_mut`), as the stream will assume that other
+    /// positions it maintains are still valid. It may also be used immediately
+    /// after construction to change the starting offset value.
     ///
     /// To change the _logical_ position in the byte stream, use `reset_pos()`
     /// instead.
@@ -336,8 +360,32 @@ impl<R> Stream<R> {
     pub fn reset_pos(&mut self, pos: u64) -> io::Result<()> {
         self.commit()?;
         self.blob_end = 0;
+        self.dynamic_blob_start = 0;
         self.pos = pos;
         Ok(())
+    }
+
+    /// Repositions the `Stream` according to `whence`.
+    ///
+    /// This is not `std::io::Seek` because it has somewhat different
+    /// semantics; in particular, the stream's current position may be changed
+    /// by this call before the seek operation itself is applied, and the
+    /// operation will be applied relative to that position.
+    ///
+    /// It is the caller's responsibility to ensure that the new location is
+    /// sensible; i.e., that the byte location points to a descriptor in the
+    /// underlying byte stream.
+    ///
+    /// The `Stream`'s own `pos` is set to match what the underlying byte
+    /// stream returns. If the client code is using a logical `pos` which
+    /// differs from the underlying stream position, the caller will need to
+    /// fix the discrepancy by calling `reset_pos()` afterwards.
+    pub fn seek(&mut self, whence: io::SeekFrom) -> io::Result<u64>
+    where R : Seek {
+        self.commit()?;
+        let off = self.inner.seek(whence)?;
+        self.reset_pos(off)?;
+        Ok(off)
     }
 
     /// Returns whether an `EndOfDoc` descriptor has been encountered.
@@ -882,6 +930,16 @@ impl<'d, R : 'd> Blob<'d, R> {
         self.stream.pos
     }
 
+    /// Directly change the current position of the stream.
+    ///
+    /// This is like `set_pos()` on `Stream` --- it directly affects what the
+    /// `Stream` believes to be its current byte offset and interacts with
+    /// other tracked byte offsets. It should only be used in conjunction with
+    /// `stream_get_ref()` and `stream_mut_ref()`.
+    pub fn stream_set_pos(&mut self, pos: u64) {
+        self.stream.pos = pos;
+    }
+
     /// Returns the byte offset of the first byte in this blob (regardless of
     /// how much of the blob has been consumed).
     pub fn start_pos(&self) -> u64 {
@@ -987,6 +1045,26 @@ impl<'d, R : 'd> Blob<'d, R> {
         } else {
             None
         }
+    }
+
+    /// Borrows a reference to the underlying byte stream.
+    ///
+    /// It is the caller's responsibility to respect the blob's boundaries.
+    ///
+    /// This is equivalent to calling `get_ref` on the `Stream` and all the
+    /// same notes apply.
+    pub fn stream_get_ref(&self) -> &R {
+        &self.stream.inner
+    }
+
+    /// Borrows a reference to the underlying byte stream.
+    ///
+    /// It is the caller's responsibility to respect the blob's boundaries.
+    ///
+    /// This is equivalent to calling `get_mut` on the `Stream` and all the
+    /// same notes apply.
+    pub fn stream_get_mut(&mut self) -> &mut R {
+        &mut self.stream.inner
     }
 }
 
