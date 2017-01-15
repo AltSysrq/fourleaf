@@ -1075,7 +1075,7 @@ impl<'d, R : Seek + 'd> Seek for Blob<'d, R> {
             if displacement > (i64::MAX as u64) {
                 return Err(io::Error::new(
                     io::ErrorKind::Other,
-                    "Cannot seek blob by >= 8 EB at a time"));
+                    "attempt to seek blob by >= 8 EB"));
             }
             self.stream.inner.seek(
                 io::SeekFrom::Current(-(displacement as i64)))?;
@@ -1085,7 +1085,7 @@ impl<'d, R : Seek + 'd> Seek for Blob<'d, R> {
             if displacement > (i64::MAX as u64) {
                 return Err(io::Error::new(
                     io::ErrorKind::Other,
-                    "Cannot seek blob by >= 8 EB at a time"));
+                    "attempt to seek blob by >= 8 EB"));
             }
             self.stream.inner.seek(
                 io::SeekFrom::Current(displacement as i64))?;
@@ -1108,16 +1108,16 @@ macro_rules! to_int {
             use wire::unzigzag;
 
             match *self {
-                Value::Null => Err("Expected Integer, got Null"),
-                Value::Blob(_) => Err("Expected Integer, got Blob"),
-                Value::Struct => Err("Expected Integer, got Struct"),
+                Value::Null => Err("expected Integer, got Null"),
+                Value::Blob(_) => Err("expected Integer, got Blob"),
+                Value::Struct => Err("expected Integer, got Struct"),
                 Value::Integer(v) => {
                     let v = $zz(v);
                     if v < ($t::MIN as $long) {
-                        Err(concat!("Integer value is less than ",
+                        Err(concat!("integer value is less than ",
                                     stringify!($t), "::MIN"))
                     } else if v > ($t::MAX as $long) {
-                        Err(concat!("Integer value is greater than ",
+                        Err(concat!("integer value is greater than ",
                                     stringify!($t), "::MAX"))
                     } else {
                         Ok(v as $t)
@@ -1135,9 +1135,9 @@ impl<'d, R : 'd> Value<'d, R> {
     pub fn to_null(&self) -> Result<(), &'static str> {
         match *self {
             Value::Null => Ok(()),
-            Value::Integer(_) => Err("Expected Null, got Integer"),
-            Value::Blob(_) => Err("Expected Null, got Blob"),
-            Value::Struct => Err("Expected Null, got Struct"),
+            Value::Integer(_) => Err("expected Null, got Integer"),
+            Value::Blob(_) => Err("expected Null, got Blob"),
+            Value::Struct => Err("expected Null, got Struct"),
         }
     }
 
@@ -1146,9 +1146,9 @@ impl<'d, R : 'd> Value<'d, R> {
     pub fn to_struct(&self) -> Result<(), &'static str> {
         match *self {
             Value::Struct => Ok(()),
-            Value::Null => Err("Expected Struct, got Null"),
-            Value::Integer(_) => Err("Expected Struct, got Integer"),
-            Value::Blob(_) => Err("Expected Struct, got Blob"),
+            Value::Null => Err("expected Struct, got Null"),
+            Value::Integer(_) => Err("expected Struct, got Integer"),
+            Value::Blob(_) => Err("expected Struct, got Blob"),
         }
     }
 
@@ -1171,7 +1171,7 @@ impl<'d, R : 'd> Value<'d, R> {
         match self.to_u64()? {
             0 => Ok(false),
             1 => Ok(true),
-            _ => Err("Boolean value was neither 0 nor 1"),
+            _ => Err("boolean value was neither 0 nor 1"),
         }
     }
 
@@ -1181,9 +1181,9 @@ impl<'d, R : 'd> Value<'d, R> {
     pub fn to_blob(&mut self) -> Result<&mut Blob<'d, R>, &'static str> {
         match *self {
             Value::Blob(ref mut b) => Ok(b),
-            Value::Null => Err("Expected Blob, got Null"),
-            Value::Integer(_) => Err("Expected Blob, got Integer"),
-            Value::Struct => Err("Expected Blob, got Struct"),
+            Value::Null => Err("expected Blob, got Null"),
+            Value::Integer(_) => Err("expected Blob, got Integer"),
+            Value::Struct => Err("expected Blob, got Struct"),
         }
     }
 }
