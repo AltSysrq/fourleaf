@@ -10,5 +10,6 @@
 #[macro_use] extern crate enum_primitive;
 extern crate num_traits;
 
+pub mod io;
 pub mod wire;
 pub mod stream;
