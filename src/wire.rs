@@ -12,9 +12,11 @@
 //! External code generally should not use things from this module; instead,
 //! prefer the `stream` module if you want to do lower-level streaming.
 
-use std::io::{self, Read, Write};
+use std::io::{Read, Write};
 
-fn read_byte<R : Read>(r: &mut R) -> io::Result<u8> {
+use stream::{Error, Result};
+
+fn read_byte<R : Read>(r: &mut R) -> Result<u8> {
     let mut buf = [0u8;1];
     r.read_exact(&mut buf)?;
     Ok(buf[0])
@@ -116,7 +118,7 @@ impl From<ParsedDescriptor> for Descriptor {
 /// Decode an unsigned integer from the given input, parsing up to 64 bits.
 ///
 /// This fails if the encoded value overflows a u64.
-pub fn decode_u64<R : Read>(r: &mut R) -> io::Result<u64> {
+pub fn decode_u64<R : Read>(r: &mut R) -> Result<u64> {
     let mut accum = 0u64;
     let mut shift = 0;
     loop {
@@ -127,8 +129,7 @@ pub fn decode_u64<R : Read>(r: &mut R) -> io::Result<u64> {
         // but this means being a bit more careful around shifting.
         if 0 != v {
             if shift >= 64 || v << shift >> shift != v {
-                return Err(io::Error::new(
-                    io::ErrorKind::InvalidData, "integer overflow"));
+                return Err(Error::IntegerOverflow);
             }
             accum |= v << shift;
         }
@@ -142,8 +143,7 @@ pub fn decode_u64<R : Read>(r: &mut R) -> io::Result<u64> {
         // maximum length (even wider than 64 bits), but ensure we give up
         // eventually.
         if shift > 256 * 7 {
-            return Err(io::Error::new(
-                io::ErrorKind::InvalidData, "denormalised integer too wide"));
+            return Err(Error::OverwideInteger);
         }
     }
 
@@ -151,7 +151,7 @@ pub fn decode_u64<R : Read>(r: &mut R) -> io::Result<u64> {
 }
 
 /// Encode an unsigned 64-bit integer to the given output.
-pub fn encode_u64<W : Write>(w: &mut W, mut i: u64) -> io::Result<()> {
+pub fn encode_u64<W : Write>(w: &mut W, mut i: u64) -> Result<()> {
     let mut bytes = [0u8;10];
     let mut n = 0;
 
@@ -167,7 +167,8 @@ pub fn encode_u64<W : Write>(w: &mut W, mut i: u64) -> io::Result<()> {
         }
     }
 
-    w.write_all(&bytes[..n])
+    w.write_all(&bytes[..n])?;
+    Ok(())
 }
 
 /// Encodes an unsigned 64-bit integer to the given output.
@@ -175,7 +176,7 @@ pub fn encode_u64<W : Write>(w: &mut W, mut i: u64) -> io::Result<()> {
 /// The integer is "fixed-width" in that it always occupies the full 10 bytes
 /// regardless of its value. This allows in-place updates of the value while
 /// still allowing `decode_u64` to understand it.
-pub fn encode_fixed_u64<W : Write>(w: &mut W, mut i: u64) -> io::Result<()> {
+pub fn encode_fixed_u64<W : Write>(w: &mut W, mut i: u64) -> Result<()> {
     let mut bytes = [0u8;10];
     for n in 0..bytes.len() {
         bytes[n] = (i & 0x7F) as u8;
@@ -185,7 +186,8 @@ pub fn encode_fixed_u64<W : Write>(w: &mut W, mut i: u64) -> io::Result<()> {
         }
     }
 
-    w.write_all(&bytes)
+    w.write_all(&bytes)?;
+    Ok(())
 }
 
 /// Invert `zigzag`.
@@ -195,7 +197,7 @@ pub fn unzigzag(i: u64) -> i64 {
 }
 
 /// Decode a 64-bit integer and then unZigZag it to a signed value.
-pub fn decode_i64<R : Read>(r: &mut R) -> io::Result<i64> {
+pub fn decode_i64<R : Read>(r: &mut R) -> Result<i64> {
     let i = decode_u64(r)?;
     Ok(unzigzag(i))
 }
@@ -207,20 +209,21 @@ pub fn zigzag(i: i64) -> u64 {
 
 /// ZigZag the given signed 64-bit integer to unsigned format, then write it to
 /// the given output.
-pub fn encode_i64<W : Write>(w: &mut W, i: i64) -> io::Result<()> {
+pub fn encode_i64<W : Write>(w: &mut W, i: i64) -> Result<()> {
     encode_u64(w, zigzag(i))
 }
 
 /// Read a descriptor from the given input.
 pub fn decode_descriptor<R : Read>(r: &mut R)
-                                   -> io::Result<Descriptor> {
+                                   -> Result<Descriptor> {
     read_byte(r).map(Descriptor)
 }
 
 /// Write a descriptor to the given output.
 pub fn encode_descriptor<W : Write>(w: &mut W, desc: Descriptor)
-                                    -> io::Result<()> {
-    w.write_all(&[desc.0])
+                                    -> Result<()> {
+    w.write_all(&[desc.0])?;
+    Ok(())
 }
 
 #[cfg(test)]
@@ -228,6 +231,7 @@ mod test {
     use std::io;
     use std::{i64, u64};
 
+    use stream::Error;
     use super::*;
 
     #[test]
@@ -275,7 +279,8 @@ mod test {
         match decode_u64(&mut&[255, 255, 255, 255, 255,
                                255, 255, 255, 255, 2][..]) {
             Ok(i) => panic!("Unexpectedly decoded {}", i),
-            Err(e) => assert_eq!(io::ErrorKind::InvalidData, e.kind()),
+            Err(Error::IntegerOverflow) => { },
+            Err(e) => panic!("Failed for wrong reason: {}", e),
         }
     }
 
@@ -285,7 +290,8 @@ mod test {
                                128, 128, 128, 128, 128,
                                128, 128, 128, 128, 1][..]) {
             Ok(i) => panic!("Unexpectedly decoded {}", i),
-            Err(e) => assert_eq!(io::ErrorKind::InvalidData, e.kind()),
+            Err(Error::IntegerOverflow) => { },
+            Err(e) => panic!("Failed for wrong reason: {}", e),
         }
     }
 
@@ -293,7 +299,8 @@ mod test {
     fn integer_decode_eventually_gives_up_decoding_denorm() {
         match decode_u64(&mut&[128u8;4096][..]) {
             Ok(i) => panic!("Unexpectedly decoded {}", i),
-            Err(e) => assert_eq!(io::ErrorKind::InvalidData, e.kind()),
+            Err(Error::OverwideInteger) => { },
+            Err(e) => panic!("Failed for wrong reason: {}", e),
         }
     }
 
@@ -323,5 +330,3 @@ mod test {
         test!(0xFF, ParsedDescriptor::Pair(DescriptorType::Struct, 63));
     }
 }
-
-//  LocalWords:  denormalised

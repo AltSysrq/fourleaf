@@ -10,6 +10,9 @@
 //! TODO
 
 #![deny(missing_docs)]
+#![recursion_limit = "1024"]
+
+#[macro_use] extern crate quick_error;
 
 pub mod io;
 pub mod wire;

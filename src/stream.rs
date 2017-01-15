@@ -26,6 +26,99 @@ impl<T> fmt::Debug for Nd<T> {
     }
 }
 
+quick_error! {
+    /// Errors which may be encountered when operating on a `Stream`.
+    #[derive(Debug)]
+    pub enum Error {
+        /// An IO error occurred on the underlying byte stream.
+        Io(err: io::Error) {
+            from()
+            cause(err)
+            description(err.description())
+        }
+        /// An integer was encountered that was larger than the maximum bit
+        /// width supported by this implementation.
+        IntegerOverflow {
+            description("integer overflow")
+        }
+        /// An integer (possibly in denormalised form) was encountered which
+        /// was rejected as being excessively wide, even though it did not
+        /// overflow the implementation's maximum bit width in the prefix that
+        /// was examined.
+        OverwideInteger {
+            description("encoded integer too wide")
+        }
+        /// An exception element was encountered in the stream and was handled
+        /// by interpreting it as an error message.
+        Exception(msg: String) {
+            description("error message in stream")
+            display("error message in stream: {}", msg)
+        }
+        /// A blob element was found upon reading to have a declared length
+        /// larger than the rest of the stream.
+        TruncatedBlob(bytes_remaining: u64) {
+            description("blob extends beyond EOF")
+            display("blob extends beyond EOF ({} bytes remaining)",
+                    bytes_remaining)
+        }
+        /// A blob would be read or written that would result in an end
+        /// position greater than `u64::MAX`.
+        OverlongBlob {
+            description("blob length too long")
+        }
+        /// When writing to a stream, the writer allocated a blob of a fixed
+        /// length but did not fully write it.
+        ///
+        /// This error will also happen if the writer seeks the position in the
+        /// blob to a location other than the end and then tries to continue
+        /// using the `Stream`.
+        IncompleteBlob(bytes_remaining: u64) {
+            description("blob not fully written")
+            display("blob not fully written ({} bytes remaining)",
+                    bytes_remaining)
+        }
+        /// The writer started a dynamic blob, but then repositioned the stream
+        /// to before the start of the blob.
+        ///
+        /// This should not ordinarily be possible without using methods like
+        /// `stream_get_mut` and `set_stream_pos` on the blob to bypass the
+        /// abstraction.
+        PositionBeforeStartOfDynamicBlob {
+            description("stream position moved before start of dynamic blob")
+        }
+        /// The writer created a dynamic blob and wrote more than `i64::MAX`
+        /// bytes to it.
+        OverlongDynamicBlob {
+            description("dynamic blob length exceeds i64::MAX")
+        }
+        /// A reader requested to read a blob up to some maximum size, but the
+        /// remaining size of the blob is greater than that.
+        LargeBlob(max: usize, remaining: u64) {
+            description("blob exceeds maximum requested size")
+            display("blob (size {}) exceeds maximum requested size ({})",
+                    remaining, max)
+        }
+        /// A conversion method was called on a `Value` which was not of the
+        /// type the caller expected.
+        UnexpectedType(expected: &'static str, actual: &'static str) {
+            description("unexpected field type")
+            display("expected field type {}, got {}", expected, actual)
+        }
+        /// A conversion method was called on a `Value` which held an integer,
+        /// but that integer was out of the legal range for the desired type.
+        IntegerOutOfRange(message: &'static str) {
+            description(message)
+            display("{}", message)
+        }
+        #[doc(hidden)]
+        #[allow(missing_docs)]
+        _NonExhaustive { }
+    }
+}
+
+/// General result type returned by `Stream`.
+pub type Result<T> = ::std::result::Result<T, Error>;
+
 /// Streaming fourleaf parser and encoder.
 ///
 /// The parser is built around pulling one tag/value pair at a time via
@@ -39,8 +132,8 @@ impl<T> fmt::Debug for Nd<T> {
 /// read exactly one byte.
 ///
 /// The position of the underlying reader is always immediately after the last
-/// content read, unless any method call returns an `io::Error`, in which case
-/// the exact position is unspecified and continued use of the stream will not
+/// content read, unless any method call returns an `Error`, in which case the
+/// exact position is unspecified and continued use of the stream will not
 /// result in well-defined results.
 #[derive(Debug)]
 pub struct Stream<R> {
@@ -62,7 +155,7 @@ pub struct Stream<R> {
                         -> io::Result<u64>>>,
     /// If `Some`, an operation that must be called on `self` to bring the
     /// stream into a consistent state.
-    commit: Option<Nd<fn (&mut Stream<R>) -> io::Result<()>>>,
+    commit: Option<Nd<fn (&mut Stream<R>) -> Result<()>>>,
 }
 
 /// An element decoded from a fourleaf stream.
@@ -208,7 +301,7 @@ macro_rules! write_int {
         /// ## Panics
         ///
         /// Panics if `tag` is not a valid field tag.
-        pub fn $name(&mut self, tag: u8, n: $t) -> io::Result<()>
+        pub fn $name(&mut self, tag: u8, n: $t) -> Result<()>
         where R : Write {
             #[allow(unused_imports)]
             use wire::zigzag;
@@ -252,15 +345,15 @@ impl<R> Stream<R> {
         }
     }
 
-    fn skip_by_discard(&mut self, n: u64) -> io::Result<u64>
+    fn skip_by_discard(&mut self, n: u64) -> Result<u64>
     where R : Read {
-        io::copy(&mut self.track(false).take(n), &mut io::sink())
+        Ok(io::copy(&mut self.track(false).take(n), &mut io::sink())?)
     }
 
     fn skip_by_seek(&mut self, n: u64,
                     seek: fn (&mut R, io::SeekFrom) ->
                              io::Result<u64>)
-                    -> io::Result<u64>
+                    -> Result<u64>
     where R : Read {
         // If the amount is to large to be passed to `SeekFrom:Current`, split
         // into smaller pieces. This is fine since we're allowed to fail partially.
@@ -294,7 +387,7 @@ impl<R> Stream<R> {
     ///
     /// Calls to `Stream` which read or write data will implicitly commit
     /// changes that occurred before that call.
-    pub fn commit(&mut self) -> io::Result<()> {
+    pub fn commit(&mut self) -> Result<()> {
         if let Some(Nd(f)) = self.commit {
             f(self)?;
             self.commit = None;
@@ -360,7 +453,7 @@ impl<R> Stream<R> {
     ///
     /// This will cause the stream to flush any operations depending on the
     /// current position, and so can encounter IO errors.
-    pub fn reset_pos(&mut self, pos: u64) -> io::Result<()> {
+    pub fn reset_pos(&mut self, pos: u64) -> Result<()> {
         self.commit()?;
         self.blob_end = 0;
         self.dynamic_blob_start = 0;
@@ -383,7 +476,7 @@ impl<R> Stream<R> {
     /// stream returns. If the client code is using a logical `pos` which
     /// differs from the underlying stream position, the caller will need to
     /// fix the discrepancy by calling `reset_pos()` afterwards.
-    pub fn seek(&mut self, whence: io::SeekFrom) -> io::Result<u64>
+    pub fn seek(&mut self, whence: io::SeekFrom) -> Result<u64>
     where R : Seek {
         self.commit()?;
         let off = self.inner.seek(whence)?;
@@ -458,7 +551,7 @@ impl<R> Stream<R> {
     ///
     /// If you want to use padding or exceptions as in-band signalling, see
     /// `next_element()` instead.
-    pub fn next_field(&mut self) -> io::Result<Option<Field<R>>>
+    pub fn next_field(&mut self) -> Result<Option<Field<R>>>
     where R : Read {
         match self.next_element_impl(true)? {
             Element::Padding => unreachable!(),
@@ -466,10 +559,8 @@ impl<R> Stream<R> {
             Element::Field(field) => return Ok(Some(field)),
             Element::Exception(mut blob) => {
                 let message = blob.read_or_trunc(256)?;
-                return Err(io::Error::new(
-                    io::ErrorKind::Other,
-                    format!("error message in stream: {:?}",
-                            String::from_utf8_lossy(&message[..]))));
+                return Err(Error::Exception(
+                    String::from_utf8_lossy(&message[..]).into_owned()));
             },
         }
     }
@@ -485,7 +576,7 @@ impl<R> Stream<R> {
     ///
     /// If this call returns `Element::EndOfDoc`, the `eof()` flag is
     /// implicitly set.
-    pub fn next_element(&mut self) -> io::Result<Element<R>>
+    pub fn next_element(&mut self) -> Result<Element<R>>
     where R : Read {
         self.next_element_impl(false)
     }
@@ -497,7 +588,7 @@ impl<R> Stream<R> {
     /// sometimes returns in the loop extends the loop borrows to the end of
     /// the function.
     fn next_element_impl(&mut self, skip_padding: bool)
-                         -> io::Result<Element<R>>
+                         -> Result<Element<R>>
     where R : Read {
         if self.eof {
             return Ok(Element::EndOfDoc);
@@ -538,7 +629,7 @@ impl<R> Stream<R> {
     }
 
     fn next_value(&mut self, ty: DescriptorType)
-                  -> io::Result<Value<R>>
+                  -> Result<Value<R>>
     where R : Read {
         Ok(match ty {
             DescriptorType::Null => Value::Null,
@@ -549,7 +640,7 @@ impl<R> Stream<R> {
         })
     }
 
-    fn next_blob(&mut self) -> io::Result<Blob<R>>
+    fn next_blob(&mut self) -> Result<Blob<R>>
     where R : Read {
         let len = wire::decode_u64(&mut self.track(false))?;
         self.check_advance_pos(len)?;
@@ -562,7 +653,7 @@ impl<R> Stream<R> {
         })
     }
 
-    fn skip_blob(&mut self) -> io::Result<()>
+    fn skip_blob(&mut self) -> Result<()>
     where R : Read {
         if self.blob_end > self.pos {
             let n = self.blob_end - self.pos;
@@ -572,9 +663,7 @@ impl<R> Stream<R> {
                 self.skip_by_discard(n)
             }?;
             if skipped < n {
-                return Err(io::Error::new(
-                    io::ErrorKind::UnexpectedEof,
-                    "EOF reached before end of blob"));
+                return Err(Error::TruncatedBlob(n - skipped));
             }
         }
         Ok(())
@@ -585,7 +674,7 @@ impl<R> Stream<R> {
     /// ## Panics
     ///
     /// Panics if `tag` is not a valid field tag.
-    pub fn write_null(&mut self, tag: u8) -> io::Result<()>
+    pub fn write_null(&mut self, tag: u8) -> Result<()>
     where R : Write {
         self.write_desc(wire::ParsedDescriptor::Pair(
             wire::DescriptorType::Null, tag))
@@ -596,7 +685,7 @@ impl<R> Stream<R> {
     /// ## Panics
     ///
     /// Panics if `tag` is not a valid field tag.
-    pub fn write_u64(&mut self, tag: u8, n: u64) -> io::Result<()>
+    pub fn write_u64(&mut self, tag: u8, n: u64) -> Result<()>
     where R : Write {
         self.write_desc(wire::ParsedDescriptor::Pair(
             wire::DescriptorType::Integer, tag))?;
@@ -619,7 +708,7 @@ impl<R> Stream<R> {
     /// ## Panics
     ///
     /// Panics if `tag` is not a valid field tag.
-    pub fn write_bool(&mut self, tag: u8, b: bool) -> io::Result<()>
+    pub fn write_bool(&mut self, tag: u8, b: bool) -> Result<()>
     where R : Write {
         self.write_u64(tag, b as u64)
     }
@@ -634,7 +723,7 @@ impl<R> Stream<R> {
     ///
     /// Panics if `tag` is not a valid field tag.
     pub fn write_blob_data<D : AsRef<[u8]>>(&mut self, tag: u8, data: D)
-                                            -> io::Result<Blob<R>>
+                                            -> Result<Blob<R>>
     where R : Write {
         let data = data.as_ref();
         let mut blob = self.write_blob_alloc(tag, data.len() as u64)?;
@@ -652,14 +741,14 @@ impl<R> Stream<R> {
     ///
     /// Panics if `tag` is not a valid field tag.
     pub fn write_blob_alloc(&mut self, tag: u8, len: u64)
-                            -> io::Result<Blob<R>>
+                            -> Result<Blob<R>>
     where R : Write {
         self.write_desc_with_blob_alloc(wire::ParsedDescriptor::Pair(
             wire::DescriptorType::Blob, tag), len)
     }
 
     fn write_desc_with_blob_alloc(&mut self, desc: wire::ParsedDescriptor,
-                                  len: u64) -> io::Result<Blob<R>>
+                                  len: u64) -> Result<Blob<R>>
     where R : Write {
         // 10 bytes length + 1 byte tag
         const OVERHEAD: u64 = 11;
@@ -667,9 +756,7 @@ impl<R> Stream<R> {
         self.commit()?;
 
         if len > u64::MAX - OVERHEAD {
-            return Err(io::Error::new(
-                io::ErrorKind::InvalidInput,
-                "blob length too long"));
+            return Err(Error::OverlongBlob);
         }
 
         self.check_advance_pos(len + OVERHEAD)?;
@@ -684,11 +771,9 @@ impl<R> Stream<R> {
         })
     }
 
-    fn check_at_end_of_blob(&mut self) -> io::Result<()> {
+    fn check_at_end_of_blob(&mut self) -> Result<()> {
         if self.pos != self.blob_end {
-            Err(io::Error::new(io::ErrorKind::InvalidInput,
-                               "blob not fully written, or position seeked \
-                                away from end of blob"))
+            Err(Error::IncompleteBlob(self.blob_end - self.pos))
         } else {
             Ok(())
         }
@@ -719,14 +804,14 @@ impl<R> Stream<R> {
     /// ## Panics
     ///
     /// Panics if `tag` is not a valid field tag.
-    pub fn write_blob_dynamic(&mut self, tag: u8) -> io::Result<Blob<R>>
+    pub fn write_blob_dynamic(&mut self, tag: u8) -> Result<Blob<R>>
     where R : Write + Seek {
         self.write_desc_with_blob_dynamic(wire::ParsedDescriptor::Pair(
             wire::DescriptorType::Blob, tag))
     }
 
     fn write_desc_with_blob_dynamic(&mut self, desc: wire::ParsedDescriptor)
-                                    -> io::Result<Blob<R>>
+                                    -> Result<Blob<R>>
     where R : Write + Seek {
         self.write_desc(desc)?;
         let len = u64::MAX - self.pos - 10;
@@ -741,22 +826,18 @@ impl<R> Stream<R> {
         })
     }
 
-    fn finish_dynamic_blob(&mut self) -> io::Result<()>
+    fn finish_dynamic_blob(&mut self) -> Result<()>
     where R : Write + Seek {
         let blob_start = self.dynamic_blob_start;
         let blob_end = self.pos;
         if self.pos < blob_start {
-            return Err(io::Error::new(
-                io::ErrorKind::Other,
-                "position moved before dynamic blob start"));
+            return Err(Error::PositionBeforeStartOfDynamicBlob);
         }
 
         let header = blob_start - 10;
         let displacement = self.pos - header;
         if displacement > (i64::MAX as u64) {
-            return Err(io::Error::new(
-                io::ErrorKind::InvalidInput,
-                "dynamic blob length exceeded i64::MAX"));
+            return Err(Error::OverlongDynamicBlob);
         }
 
         self.inner.seek(io::SeekFrom::Current(-(displacement as i64)))?;
@@ -776,21 +857,21 @@ impl<R> Stream<R> {
     /// ## Panics
     ///
     /// Panics if `tag` is not a valid field tag.
-    pub fn write_struct(&mut self, tag: u8) -> io::Result<()>
+    pub fn write_struct(&mut self, tag: u8) -> Result<()>
     where R : Write {
         self.write_desc(wire::ParsedDescriptor::Pair(
             wire::DescriptorType::Struct, tag))
     }
 
     /// Writes an end-of-struct element to the output.
-    pub fn write_end_struct(&mut self) -> io::Result<()>
+    pub fn write_end_struct(&mut self) -> Result<()>
     where R : Write {
         self.write_desc(wire::ParsedDescriptor::Special(
             wire::SpecialType::EndOfStruct))
     }
 
     /// Writes an end-of-document element to the output.
-    pub fn write_end_doc(&mut self) -> io::Result<()>
+    pub fn write_end_doc(&mut self) -> Result<()>
     where R : Write {
         self.write_desc(wire::ParsedDescriptor::Special(
             wire::SpecialType::EndOfDoc))
@@ -801,7 +882,7 @@ impl<R> Stream<R> {
     ///
     /// The semantics of the blob itself are the same as for `write_blob_data`.
     pub fn write_exception_data<D : AsRef<[u8]>>(&mut self, data: D)
-                                                 -> io::Result<Blob<R>>
+                                                 -> Result<Blob<R>>
     where R : Write {
         let data = data.as_ref();
         let mut blob = self.write_exception_alloc(data.len() as u64)?;
@@ -815,7 +896,7 @@ impl<R> Stream<R> {
     /// The semantics of the blob itself are the same as for
     /// `write_blob_alloc`.
     pub fn write_exception_alloc(&mut self, len: u64)
-                                 -> io::Result<Blob<R>>
+                                 -> Result<Blob<R>>
     where R : Write {
         self.write_desc_with_blob_alloc(wire::ParsedDescriptor::Special(
             wire::SpecialType::Exception), len)
@@ -826,14 +907,14 @@ impl<R> Stream<R> {
     ///
     /// The semantics of the blob itself are the same as for
     /// `write_blob_dynamic`.
-    pub fn write_exception_dynamic(&mut self) -> io::Result<Blob<R>>
+    pub fn write_exception_dynamic(&mut self) -> Result<Blob<R>>
     where R : Write + Seek {
         self.write_desc_with_blob_dynamic(wire::ParsedDescriptor::Special(
             wire::SpecialType::Exception))
     }
 
     /// Writes a padding element to the output.
-    pub fn write_padding(&mut self) -> io::Result<()>
+    pub fn write_padding(&mut self) -> Result<()>
     where R : Write {
         self.write_desc(wire::ParsedDescriptor::Special(
             wire::SpecialType::Padding))
@@ -846,7 +927,7 @@ impl<R> Stream<R> {
     /// written, but the effect of a call to `commit()` happens regardless.
     ///
     /// `alignment` must be a power of two.
-    pub fn pad_to_align(&mut self, align: u64) -> io::Result<()>
+    pub fn pad_to_align(&mut self, align: u64) -> Result<()>
     where R : Write {
         debug_assert!(0 == (align & (align - 1)),
                       "`fourleaf::stream::Stream::pad_to_align()` called with \
@@ -860,7 +941,7 @@ impl<R> Stream<R> {
         Ok(())
     }
 
-    fn write_desc(&mut self, desc: wire::ParsedDescriptor) -> io::Result<()>
+    fn write_desc(&mut self, desc: wire::ParsedDescriptor) -> Result<()>
     where R : Write {
         self.commit()?;
         wire::encode_descriptor(&mut self.track(false),
@@ -872,7 +953,7 @@ impl<R> Stream<R> {
     /// This is useful for copying from one `Stream` to another. For other
     /// uses, prefer calling the direct functions instead of constructing
     /// `Element`s programatically.
-    pub fn write_element<I>(&mut self, e: &mut Element<I>) -> io::Result<()>
+    pub fn write_element<I>(&mut self, e: &mut Element<I>) -> Result<()>
     where R : Write, I : Read {
         match *e {
             Element::Field(ref mut f) => self.write_field(f),
@@ -892,7 +973,7 @@ impl<R> Stream<R> {
     /// This is useful for copying from one `Stream` to another. For other
     /// uses, prefer calling the direct functions instead of constructing
     /// `Field`s programatically.
-    pub fn write_field<I>(&mut self, f: &mut Field<I>) -> io::Result<()>
+    pub fn write_field<I>(&mut self, f: &mut Field<I>) -> Result<()>
     where R : Write, I : Read {
         match f.value {
             Value::Null => self.write_null(f.tag),
@@ -972,12 +1053,10 @@ impl<'d, R : 'd> Blob<'d, R> {
     /// maximum reasonable allocation size should be given instead.
     ///
     /// If the length of this blob is larger than `max`, an error is returned.
-    pub fn read_fully(&mut self, max: usize) -> io::Result<Vec<u8>>
+    pub fn read_fully(&mut self, max: usize) -> Result<Vec<u8>>
     where R : Read {
         if self.remaining() > (max as u64) {
-            return Err(io::Error::new(
-                io::ErrorKind::InvalidData,
-                "blob length longer than maximum size"));
+            return Err(Error::LargeBlob(max, self.remaining()));
         }
 
         let mut ret = Vec::new();
@@ -992,7 +1071,7 @@ impl<'d, R : 'd> Blob<'d, R> {
     ///
     /// If this does not read the full blob, it is still possible to read the
     /// remaining parts via further calls to methods on the blob.
-    pub fn read_or_trunc(&mut self, max: usize) -> io::Result<Vec<u8>>
+    pub fn read_or_trunc(&mut self, max: usize) -> Result<Vec<u8>>
     where R : Read {
         let mut ret = Vec::new();
         self.take(max as u64).read_to_end(&mut ret)?;
@@ -1005,14 +1084,14 @@ impl<'d, R : 'd> Blob<'d, R> {
     ///
     /// Returns `Err` if the nominal length of the blob is larger than the
     /// underlying slice.
-    pub fn slice(&self) -> Result<&[u8], &'static str>
+    pub fn slice(&self) -> Result<&[u8]>
     where R : AsRef<[u8]> {
         let rem = self.remaining();
         let inner = self.stream.inner.as_ref();
         if rem <= (inner.len() as u64) {
             Ok(&inner[..(rem as usize)])
         } else {
-            Err("nominal blob length longer than input")
+            Err(Error::TruncatedBlob(rem - (inner.len() as u64)))
         }
     }
 
@@ -1024,14 +1103,14 @@ impl<'d, R : 'd> Blob<'d, R> {
     ///
     /// Returns `Err` if the nominal length of the blob is larger than the
     /// underlying slice.
-    pub fn ext_slice<'a>(&mut self) -> Result<&'a [u8], &'static str>
+    pub fn ext_slice<'a>(&mut self) -> Result<&'a [u8]>
     where R : AsExtBytes<'a> {
+        let buf = self.stream.inner.as_ext_bytes();
         let remaining = self.remaining();
-        if remaining > (usize::MAX as u64) {
-            Err("nominal blob length longer than usize::MAX")
+        if remaining > (buf.len() as u64) {
+            Err(Error::TruncatedBlob(remaining - (buf.len() as u64)))
         } else {
-            self.as_ext_bytes(remaining as usize).ok_or(
-                "nominal blob length longer than input")
+            Ok(&buf[..(remaining as usize)])
         }
     }
 
@@ -1045,14 +1124,14 @@ impl<'d, R : 'd> Blob<'d, R> {
     ///
     /// Returns `Err` if the nominal length of the blob is larger than the
     /// underlying slice.
-    pub fn slice_mut(&mut self) -> Result<&mut [u8], &'static str>
+    pub fn slice_mut(&mut self) -> Result<&mut [u8]>
     where R : AsMut<[u8]> {
         let rem = self.remaining();
         let inner = self.stream.inner.as_mut();
         if rem <= (inner.len() as u64) {
             Ok(&mut inner[..(rem as usize)])
         } else {
-            Err("nominal blob length longer than input")
+            Err(Error::TruncatedBlob(rem - (inner.len() as u64)))
         }
     }
 
@@ -1181,14 +1260,6 @@ impl<'d, R : Seek + 'd> Seek for Blob<'d, R> {
     }
 }
 
-impl<'d, 'a, R : AsExtBytes<'a>> AsExtBytes<'a> for Blob<'d, R> {
-    fn as_ext_bytes(&mut self, n: usize) -> Option<&'a [u8]> {
-        if (n as u64) > self.remaining() { return None; }
-        self.stream.inner.as_ext_bytes(n)
-    }
-}
-
-
 macro_rules! to_int {
     ($meth:ident -> $t:ident, $zz:ident -> $long:ty) => {
         /// If this value is an integer, adjust it for signedness, check that
@@ -1196,22 +1267,27 @@ macro_rules! to_int {
         ///
         /// An error is returned if this value is not an integer, or is an
         /// integer but is out of range.
-        pub fn $meth(&self) -> Result<$t, &'static str> {
+        pub fn $meth(&self) -> Result<$t> {
             #[allow(unused_imports)]
             use wire::unzigzag;
 
             match *self {
-                Value::Null => Err("expected Integer, got Null"),
-                Value::Blob(..) => Err("expected Integer, got Blob"),
-                Value::Struct(..) => Err("expected Integer, got Struct"),
+                Value::Null =>
+                    Err(Error::UnexpectedType("Integer", "Null")),
+                Value::Blob(..) =>
+                    Err(Error::UnexpectedType("Integer", "Blob")),
+                Value::Struct(..) =>
+                    Err(Error::UnexpectedType("Integer", "Struct")),
                 Value::Integer(v) => {
                     let v = $zz(v);
                     if v < ($t::MIN as $long) {
-                        Err(concat!("integer value is less than ",
-                                    stringify!($t), "::MIN"))
+                        Err(Error::IntegerOutOfRange(
+                            concat!("integer value is less than ",
+                                    stringify!($t), "::MIN")))
                     } else if v > ($t::MAX as $long) {
-                        Err(concat!("integer value is greater than ",
-                                    stringify!($t), "::MAX"))
+                        Err(Error::IntegerOutOfRange(
+                            concat!("integer value is greater than ",
+                                    stringify!($t), "::MAX")))
                     } else {
                         Ok(v as $t)
                     }
@@ -1225,23 +1301,29 @@ fn id<T>(t: T) -> T { t }
 
 impl<'d, R : 'd> Value<'d, R> {
     /// If this value is Null, return `()`. Otherwise, return an error message.
-    pub fn to_null(&self) -> Result<(), &'static str> {
+    pub fn to_null(&self) -> Result<()> {
         match *self {
             Value::Null => Ok(()),
-            Value::Integer(..) => Err("expected Null, got Integer"),
-            Value::Blob(..) => Err("expected Null, got Blob"),
-            Value::Struct(..) => Err("expected Null, got Struct"),
+            Value::Integer(..) =>
+                Err(Error::UnexpectedType("Null", "Integer")),
+            Value::Blob(..) =>
+                Err(Error::UnexpectedType("Null", "Blob")),
+            Value::Struct(..) =>
+                Err(Error::UnexpectedType("Null", "Struct")),
         }
     }
 
     /// If this value is a Struct, return the source stream. Otherwise, return
     /// an error message.
-    pub fn to_struct(&mut self) -> Result<&mut Stream<R>, &'static str> {
+    pub fn to_struct(&mut self) -> Result<&mut Stream<R>> {
         match *self {
             Value::Struct(ref mut s) => Ok(s),
-            Value::Null => Err("expected Struct, got Null"),
-            Value::Integer(..) => Err("expected Struct, got Integer"),
-            Value::Blob(..) => Err("expected Struct, got Blob"),
+            Value::Null =>
+                Err(Error::UnexpectedType("Struct", "Null")),
+            Value::Integer(..) =>
+                Err(Error::UnexpectedType("Struct", "Integer")),
+            Value::Blob(..) =>
+                Err(Error::UnexpectedType("Struct", "Blob")),
         }
     }
 
@@ -1260,23 +1342,27 @@ impl<'d, R : 'd> Value<'d, R> {
     ///
     /// An error is returned if this value is not an integer, or if it is an
     /// integer not equal to 0 or 1.
-    pub fn to_bool(&self) -> Result<bool, &'static str> {
+    pub fn to_bool(&self) -> Result<bool> {
         match self.to_u64()? {
             0 => Ok(false),
             1 => Ok(true),
-            _ => Err("boolean value was neither 0 nor 1"),
+            _ => Err(Error::IntegerOutOfRange(
+                "boolean value was neither 0 nor 1")),
         }
     }
 
     /// If this value is a Blob, return a reference to the blob.
     ///
     /// An error is returned if this value is not a blob.
-    pub fn to_blob(&mut self) -> Result<&mut Blob<'d, R>, &'static str> {
+    pub fn to_blob(&mut self) -> Result<&mut Blob<'d, R>> {
         match *self {
             Value::Blob(ref mut b) => Ok(b),
-            Value::Null => Err("expected Blob, got Null"),
-            Value::Integer(..) => Err("expected Blob, got Integer"),
-            Value::Struct(..) => Err("expected Blob, got Struct"),
+            Value::Null =>
+                Err(Error::UnexpectedType("Blob", "Null")),
+            Value::Integer(..) =>
+                Err(Error::UnexpectedType("Blob", "Integer")),
+            Value::Struct(..) =>
+                Err(Error::UnexpectedType("Blob", "Struct")),
         }
     }
 }
@@ -1286,7 +1372,6 @@ mod test {
     use std::io::{self, BufRead, Read, Seek, Write};
     use std::str;
 
-    use io::AsExtBytes;
     use super::*;
 
     fn parse(text: &str) -> Vec<u8> {
@@ -1346,7 +1431,9 @@ mod test {
 
         match dec.next_field() {
             Ok(r) => panic!("next_field succeeded unexpectedly: {:?}", r),
-            Err(e) => assert_eq!(io::ErrorKind::UnexpectedEof, e.kind()),
+            Err(Error::Io(e)) => assert_eq!(io::ErrorKind::UnexpectedEof,
+                                            e.kind()),
+            Err(e) => panic!("Failed with wrong error: {}", e),
         }
     }
 
@@ -1534,7 +1621,9 @@ mod test {
 
         match dec.next_field() {
             Ok(f) => panic!("next_field succeeded unexpectedly: {:?}", f),
-            Err(e) => assert_eq!(io::ErrorKind::UnexpectedEof, e.kind()),
+            Err(Error::Io(e)) => assert_eq!(io::ErrorKind::UnexpectedEof,
+                                            e.kind()),
+            Err(e) => panic!("Failed with wrong error: {}", e),
         }
     }
 
@@ -1810,19 +1899,6 @@ mod test {
 
         assert_eq!(b"hello world", hw);
         assert_eq!(b"plugh", plugh);
-    }
-
-    #[test]
-    fn blob_ext_bytes_prevents_read_past_end() {
-        let data = parse("81 0B 'hello world' 02");
-        let mut dec = Stream::from_slice(&data[..]);
-        let mut field = dec.next_field().unwrap().unwrap();
-        assert_eq!(1, field.tag);
-        let blob = field.value.to_blob().unwrap();
-        assert!(blob.as_ext_bytes(12).is_none());
-        blob.read_or_trunc(6).unwrap();
-        assert_eq!(b"world", blob.ext_slice().unwrap());
-        assert!(blob.as_ext_bytes(6).is_none());
     }
 
     #[test]

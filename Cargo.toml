@@ -13,3 +13,4 @@ A simple, tag-based binary serialisation format.
 """
 
 [dependencies]
+quick-error = "1.1.0"

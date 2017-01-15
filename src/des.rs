@@ -10,10 +10,10 @@
 //! Defines traits and utilities for high-level deserialisation.
 
 use std::fmt;
-use std::io::{self, Read};
+use std::io::Read;
 
 use io::AsExtBytes;
-use stream;
+use stream::{self, Result};
 
 /// Run-time configuration for deserialisation.
 #[derive(Debug, Clone)]
@@ -64,10 +64,9 @@ pub struct Context<'a> {
 impl<'a> Context<'a> {
     /// Creates a context subordinate to this one for the given field, provided
     /// it does not exceed the recursion limit.
-    pub fn push(&'a self, field: &'a str, pos: u64) -> io::Result<Self> {
+    pub fn push(&'a self, field: &'a str, pos: u64) -> Result<Self> {
         if self.depth >= self.config.recursion_limit {
-            Err(io::Error::new(io::ErrorKind::Other,
-                               "fourleaf recursion limit exceeded"))
+            panic!("TODO return an error")
         } else {
             Ok(Context {
                 next: Some(self),
@@ -82,23 +81,12 @@ impl<'a> Context<'a> {
     /// If unknown fields are to result in an error, return such an error.
     /// Otherwise, return `Ok(())`.
     pub fn unknown_field<R>(&self, field: &stream::Field<R>)
-                            -> io::Result<()> {
+                            -> Result<()> {
         if self.config.ignore_unknown_fields {
             Ok(())
         } else {
-            Err(io::Error::new(
-                io::ErrorKind::InvalidData,
-                format!("unknown tag {} at {}.{{{}}}",
-                        field.tag, self, field.pos)))
+            panic!("TODO return an error")
         }
-    }
-
-    /// Wrap the given field conversion result so that errors have contextual
-    /// information.
-    pub fn field_cvt<T> (&self, res: Result<T, &'static str>)
-                         -> io::Result<T> {
-        res.map_err(|e| io::Error::new(
-            io::ErrorKind::InvalidData, format!("{} at {}", e, self)))
     }
 }
 
@@ -178,7 +166,7 @@ pub trait Deserialize<R : Read, STYLE = style::Copying> : Sized {
     /// `Serialize::serialize_top_level`.
     fn deserialize_top_level
         (context: &Context, stream: &mut stream::Stream<R>)
-        -> io::Result<Self>
+        -> Result<Self>
     {
         Ok(des_struct_body! {
             (context, stream);
@@ -194,7 +182,7 @@ pub trait Deserialize<R : Read, STYLE = style::Copying> : Sized {
     fn deserialize_field
         (accum: &mut Self::Accum, context: &Context,
          field: &mut stream::Field<R>)
-        -> io::Result<()>;
+        -> Result<()>;
 
     /// Deserialises this type from a single field entry, which is known to be
     /// the only occurrence that would constitute this value.
@@ -202,7 +190,7 @@ pub trait Deserialize<R : Read, STYLE = style::Copying> : Sized {
     /// The default implementation default-initialises an `Accum`, calls
     /// `deserialize_field`, and then `finish`.
     fn deserialize_element
-        (context: &Context, field: &mut stream::Field<R>) -> io::Result<Self>
+        (context: &Context, field: &mut stream::Field<R>) -> Result<Self>
     {
         let mut accum = <Self::Accum as Default>::default();
         Self::deserialize_field(&mut accum, context, field)?;
@@ -213,7 +201,7 @@ pub trait Deserialize<R : Read, STYLE = style::Copying> : Sized {
     ///
     /// May fail if the appropriate number of items have not been accumulated,
     /// etc.
-    fn finish(accum: Self::Accum, context: &Context) -> io::Result<Self>;
+    fn finish(accum: Self::Accum, context: &Context) -> Result<Self>;
 }
 
 /// Trait for deserialisable values which are represented as exactly one field
@@ -223,7 +211,7 @@ pub trait Deserialize<R : Read, STYLE = style::Copying> : Sized {
 pub trait UnaryDeserialize<R : Read, STYLE> : Sized {
     /// Deserialise an instance of `Self` from the given field.
     fn deserialize_unary(context: &Context, field: &mut stream::Field<R>)
-                         -> io::Result<Self>;
+                         -> Result<Self>;
 }
 
 impl<T, R : Read, STYLE> Deserialize<R, STYLE> for T
@@ -232,35 +220,31 @@ where T : UnaryDeserialize<R, STYLE> {
 
     fn deserialize_field(accum: &mut Option<T>, context: &Context,
                          field: &mut stream::Field<R>)
-                         -> io::Result<()> {
+                         -> Result<()> {
         if accum.is_some() {
-            return Err(io::Error::new(
-                io::ErrorKind::InvalidData,
-                format!("field at {} occurs more than once", context)));
+            panic!("TODO return an error")
         }
 
         *accum = Some(T::deserialize_unary(context, field)?);
         Ok(())
     }
 
-    fn finish(accum: Option<T>, context: &Context) -> io::Result<T> {
-        accum.ok_or_else(|| io::Error::new(
-            io::ErrorKind::InvalidData,
-            format!("missing field {}", context)))
+    fn finish(accum: Option<T>, context: &Context) -> Result<T> {
+        accum.ok_or_else(|| panic!("TODO return an error"))
     }
 }
 
 impl<R : Read, STYLE> UnaryDeserialize<R, STYLE> for () {
     fn deserialize_unary(context: &Context, field: &mut stream::Field<R>)
-                         -> io::Result<()> {
-        context.field_cvt(field.value.to_null())
+                         -> Result<()> {
+        field.value.to_null()
     }
 }
 
 impl<'a, R : Read + AsExtBytes<'a>> UnaryDeserialize<R, style::ZeroCopy>
 for &'a [u8] {
     fn deserialize_unary(context: &Context, field: &mut stream::Field<R>)
-                         -> io::Result<&'a [u8]> {
-        context.field_cvt(field.value.to_blob().and_then(|b| b.ext_slice()))
+                         -> Result<&'a [u8]> {
+        field.value.to_blob().and_then(|b| b.ext_slice())
     }
 }
