@@ -1858,6 +1858,7 @@ mod test {
         assert!(enc.write_end_doc().is_err());
     }
 
+    #[cfg(debug)]
     #[test]
     #[should_panic]
     fn write_tag_zero_panics() {
@@ -1865,6 +1866,7 @@ mod test {
         let _ = enc.write_null(0);
     }
 
+    #[cfg(debug)]
     #[test]
     #[should_panic]
     fn write_tag_too_large_panics() {

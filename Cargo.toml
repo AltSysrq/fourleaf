@@ -13,5 +13,3 @@ A simple, tag-based binary serialisation format.
 """
 
 [dependencies]
-enum_primitive = "*"
-num-traits = "0.1"

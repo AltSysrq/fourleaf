@@ -14,8 +14,6 @@
 
 use std::io::{self, Read, Write};
 
-use num_traits::FromPrimitive;
-
 fn read_byte<R : Read>(r: &mut R) -> io::Result<u8> {
     let mut buf = [0u8;1];
     r.read_exact(&mut buf)?;
@@ -27,28 +25,56 @@ fn read_byte<R : Read>(r: &mut R) -> io::Result<u8> {
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub struct Descriptor(#[allow(missing_docs)] pub u8);
 
-enum_from_primitive! {
 /// The type of the value (if any) following a normal `Descriptor`.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
 #[allow(missing_docs)]
+#[repr(u8)]
 pub enum DescriptorType {
     Null = 0x00,
     Integer = 0x40,
     Blob = 0x80,
     Struct = 0xC0,
 }
+
+impl DescriptorType {
+    #[inline]
+    fn from_u8(ty: u8) -> Self {
+        use self::DescriptorType::*;
+
+        match ty {
+            0x00 => Null,
+            0x40 => Integer,
+            0x80 => Blob,
+            0xC0 => Struct,
+            _ => unreachable!(),
+        }
+    }
 }
 
-enum_from_primitive! {
 /// The interpretation of a special `Descriptor`.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
 #[allow(missing_docs)]
+#[repr(u8)]
 pub enum SpecialType {
     EndOfStruct = 0x00,
     EndOfDoc = 0x40,
     Exception = 0x80,
     Padding = 0xC0,
 }
+
+impl SpecialType {
+    #[inline]
+    fn from_u8(ty: u8) -> Self {
+        use self::SpecialType::*;
+
+        match ty {
+            0x00 => EndOfStruct,
+            0x40 => EndOfDoc,
+            0x80 => Exception,
+            0xC0 => Padding,
+            _ => unreachable!(),
+        }
+    }
 }
 
 /// A `Descriptor` in a more structured format.
@@ -68,9 +94,9 @@ impl Descriptor {
         let tag = self.0 & 0x3F;
 
         if 0 == tag {
-            ParsedDescriptor::Special(SpecialType::from_u8(ty).unwrap())
+            ParsedDescriptor::Special(SpecialType::from_u8(ty))
         } else {
-            ParsedDescriptor::Pair(DescriptorType::from_u8(ty).unwrap(), tag)
+            ParsedDescriptor::Pair(DescriptorType::from_u8(ty), tag)
         }
     }
 }
