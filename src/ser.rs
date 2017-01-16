@@ -29,10 +29,12 @@ pub trait Serialize {
     /// the result must be such that the corresponding deserialisation method
     /// is able to determine when to stop.
     ///
-    /// By default, this calls `serialize_element` with a tag of 1.
+    /// By default, this calls `serialize_field` with a tag of 1 and then
+    /// writes an end-of-struct.
     fn serialize_top_level<R : Write>(&self, dst: &mut Stream<R>)
                                       -> Result<()> {
-        self.serialize_element(dst, 1)
+        self.serialize_field(dst, 1)?;
+        dst.write_end_struct()
     }
     /// Serialises this value, which is a field of a struct, to the given
     /// stream.
@@ -295,19 +297,32 @@ ser_array!(16777216);
 macro_rules! ser_tuple {
     ($($t:ident : $v:tt),*) => {
         impl <$($t : Serialize),*> Serialize for ($($t,)*) {
+            fn serialize_top_level<R : Write>
+                (&self, dst: &mut Stream<R>) -> Result<()>
+            {
+                $(self.$v.serialize_field(dst, $v + 1)?;)*
+                dst.write_end_struct()
+            }
+
             fn serialize_element<R : Write>
                 (&self, dst: &mut Stream<R>, tag: u8) -> Result<()>
             {
                 dst.write_struct(tag)?;
-                $(self.$v.serialize_field(dst, $v + 1)?;)*
+                self.serialize_top_level(dst)
+            }
+
+            fn serialize_top_level_mut<R : Write>
+                (&mut self, dst: &mut Stream<R>) -> Result<()>
+            {
+                $(self.$v.serialize_field_mut(dst, $v + 1)?;)*
                 dst.write_end_struct()
             }
+
             fn serialize_element_mut<R : Write>
                 (&mut self, dst: &mut Stream<R>, tag: u8) -> Result<()>
             {
                 dst.write_struct(tag)?;
-                $(self.$v.serialize_field_mut(dst, $v + 1)?;)*
-                dst.write_end_struct()
+                self.serialize_top_level_mut(dst)
             }
         }
     }

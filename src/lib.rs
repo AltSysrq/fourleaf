@@ -19,3 +19,6 @@ pub mod wire;
 pub mod stream;
 pub mod ser;
 pub mod des;
+
+#[cfg(test)] mod ser_des_builtin_tests;
+#[cfg(test)] mod test_helpers;

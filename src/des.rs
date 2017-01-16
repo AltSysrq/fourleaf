@@ -611,15 +611,43 @@ des_small_array!(32, 0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16,
 macro_rules! des_struct {
     (($($stuff:tt)*);
      ($ctor:expr);
-     $($tag:tt : $field:ident: $t:ty,)*) => { des_unary! {
-         ($($stuff)*);
-         |context, field| ({
-             let stream = field.value.to_struct().context(context)?;
-             des_struct_body! {
+     $($tag:tt : $field:ident: $t:ty,)*) => { $($stuff)* {
+         type Accum = Option<Self>;
+
+         fn deserialize_top_level(context: &Context,
+                                  stream: &mut stream::Stream<R>)
+                                  -> Result<Self> {
+             Ok(des_struct_body! {
                  (context, stream); ($ctor);
                  $($tag: $field: $t,)*
+             })
+         }
+
+         fn deserialize_field(accum: &mut Option<Self>,
+                              context: &Context,
+                              field: &mut stream::Field<R>)
+                              -> Result<()> {
+             if accum.is_some() {
+                 return Err(Error::FieldOccursTooManyTimes(
+                     context.to_string(), 1));
              }
-         })
+
+             *accum = Some(Self::deserialize_element(context, field)?);
+             Ok(())
+         }
+
+         fn deserialize_element(context: &Context,
+                                field: &mut stream::Field<R>)
+                                -> Result<Self> {
+             Self::deserialize_top_level(
+                 context, field.value.to_struct().context(context)?)
+         }
+
+         fn finish(accum: Option<Self>, context: &Context)
+                   -> Result<Self> {
+             accum.ok_or_else(|| Error::RequiredFieldMissing(
+                 context.to_string()))
+         }
     } }
 }
 
