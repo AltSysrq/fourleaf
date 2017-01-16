@@ -59,6 +59,7 @@ macro_rules! tcase {
 tcase!(tl_false (bool   [Copying ZeroCopy]: false       => "41 00 00"));
 tcase!(tl_true  (bool   [Copying ZeroCopy]: true        => "41 01 00"));
 tcase!(tl_i8    (i8     [Copying ZeroCopy]: 42i8        => "41 54 00"));
+tcase!(tl_u8    (u8     [Copying ZeroCopy]: 42u8        => "41 2A 00"));
 tcase!(tl_i16   (i16    [Copying ZeroCopy]: 300i16      => "41 D8 04 00"));
 tcase!(tl_u16   (u16    [Copying ZeroCopy]: 300u16      => "41 AC 02 00"));
 tcase!(tl_i32   (i32    [Copying ZeroCopy]: 300i32      => "41 D8 04 00"));
@@ -70,6 +71,7 @@ tcase!(tl_usize (usize  [Copying ZeroCopy]: 300usize    => "41 AC 02 00"));
 tcase!(sf_false ((bool,)   [Copying ZeroCopy]: (false,)       => "41 00 00"));
 tcase!(sf_true  ((bool,)   [Copying ZeroCopy]: (true,)        => "41 01 00"));
 tcase!(sf_i8    ((i8,)     [Copying ZeroCopy]: (42i8,)        => "41 54 00"));
+tcase!(sf_u8    ((u8,)     [Copying ZeroCopy]: (42u8,)        => "41 2A 00"));
 tcase!(sf_i16   ((i16,)    [Copying ZeroCopy]: (300i16,)      => "41 D8 04 00"));
 tcase!(sf_u16   ((u16,)    [Copying ZeroCopy]: (300u16,)      => "41 AC 02 00"));
 tcase!(sf_i32   ((i32,)    [Copying ZeroCopy]: (300i32,)      => "41 D8 04 00"));
@@ -81,6 +83,8 @@ tcase!(sf_usize ((usize,)  [Copying ZeroCopy]: (300usize,)    => "41 AC 02 00"))
 tcase!(ce_false (Vec<bool>   [Copying ZeroCopy]: vec![false]       => "41 00 00"));
 tcase!(ce_true  (Vec<bool>   [Copying ZeroCopy]: vec![true]        => "41 01 00"));
 tcase!(ce_i8    (Vec<i8>     [Copying ZeroCopy]: vec![42i8]        => "41 54 00"));
+// No test with `Vec<u8>` here because it behaves specially.
+//tcase!(ce_u8    (Vec<u8>     [Copying ZeroCopy]: vec![42u8]        => "41 2A 00"));
 tcase!(ce_i16   (Vec<i16>    [Copying ZeroCopy]: vec![300i16]      => "41 D8 04 00"));
 tcase!(ce_u16   (Vec<u16>    [Copying ZeroCopy]: vec![300u16]      => "41 AC 02 00"));
 tcase!(ce_i32   (Vec<i32>    [Copying ZeroCopy]: vec![300i32]      => "41 D8 04 00"));
@@ -103,3 +107,33 @@ tcase!(ce_one_tuple (Vec<(u32,)> [Copying ZeroCopy]: vec![(5,)] =>
                      "C1 41 05 00 00"));
 tcase!(ce_two_tuple (Vec<(u32,i32)> [Copying ZeroCopy]: vec![(5,4)] =>
                      "C1 41 05 42 08 00 00"));
+
+// Byte containers
+tcase!(tl_str (&str [ZeroCopy]: "plugh" => "81 05 'plugh' 00"));
+tcase!(tl_string (String [Copying ZeroCopy]: "plugh".to_owned() =>
+                  "81 05 'plugh' 00"));
+tcase!(tl_byte_slice (&[u8] [ZeroCopy]: b"plugh\xff" =>
+                      "81 06 'plugh' FF 00"));
+tcase!(tl_vec_bytes (Vec<u8> [Copying ZeroCopy]: vec![42, 255] =>
+                     "81 02 2A FF 00"));
+tcase!(tl_byte_array ([u8;4] [Copying ZeroCopy]: [0, 1, 2, 3] =>
+                      "81 04 00 01 02 03 00"));
+tcase!(sf_str ((&str,) [ZeroCopy]: ("plugh",) => "81 05 'plugh' 00"));
+tcase!(sf_string ((String,) [Copying ZeroCopy]: ("plugh".to_owned(),) =>
+                  "81 05 'plugh' 00"));
+tcase!(sf_byte_slice ((&[u8],) [ZeroCopy]: (b"plugh\xff",) =>
+                      "81 06 'plugh' FF 00"));
+tcase!(sf_vec_bytes ((Vec<u8>,) [Copying ZeroCopy]: (vec![42, 255],) =>
+                     "81 02 2A FF 00"));
+tcase!(sf_byte_array (([u8;4],) [Copying ZeroCopy]: ([0, 1, 2, 3],) =>
+                      "81 04 00 01 02 03 00"));
+tcase!(ce_str (Vec<&str> [ZeroCopy]: vec!["plugh"] =>
+               "81 05 'plugh' 00"));
+tcase!(ce_string (Vec<String> [Copying ZeroCopy]: vec!["plugh".to_owned()] =>
+                  "81 05 'plugh' 00"));
+tcase!(ce_byte_slice (Vec<&[u8]> [ZeroCopy]: vec![b"plugh\xff"] =>
+                      "81 06 'plugh' FF 00"));
+tcase!(ce_vec_bytes (Vec<Vec<u8>> [Copying ZeroCopy]: vec![vec![42, 255]] =>
+                     "81 02 2A FF 00"));
+tcase!(ce_byte_array (Vec<[u8;4]> [Copying ZeroCopy]: vec![[0, 1, 2, 3]] =>
+                      "81 04 00 01 02 03 00"));

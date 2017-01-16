@@ -19,9 +19,6 @@ use stream::{Result, Stream};
 /// intended for functionality like storing byte offsets. By default, all
 /// `_mut` methods simply delegate to the corresponding non-mutable one, so an
 /// implementation overriding one such method should do so with all of them.
-///
-/// Note that `u8` does not implement this trait deliberately, so that `[u8]`
-/// and so forth can serialise as blobs instead of lists.
 pub trait Serialize {
     /// Serialises this value, which is at top-level.
     ///
@@ -54,6 +51,20 @@ pub trait Serialize {
     /// to the stream.
     fn serialize_element<R : Write>(&self, dst: &mut Stream<R>, tag: u8)
                                     -> Result<()>;
+    /// If slices of this type should be written specially, do so and return
+    /// `Some` result. Otherwise, return `None`.
+    ///
+    /// If this does handle the value specially, it must write exactly one
+    /// field with the given tag to `dst`.
+    ///
+    /// This mainly exists so that `[u8]` is serialised as a blob.
+    #[allow(unused_variables)]
+    fn serialize_slice<R : Write>
+        (selves: &[Self], dst: &mut Stream<R>, tag: u8)
+         -> Option<Result<()>>
+    where Self : Sized {
+        None
+    }
 
     /// The mutable variant of `serialize_top_level`.
     fn serialize_top_level_mut<R : Write>(&mut self, dst: &mut Stream<R>)
@@ -69,6 +80,13 @@ pub trait Serialize {
     fn serialize_element_mut<R : Write>(&mut self, dst: &mut Stream<R>, tag: u8)
                                         -> Result<()> {
         self.serialize_element(dst, tag)
+    }
+    /// The mutable variant of `serialize_slice`.
+    fn serialize_slice_mut<R : Write>
+        (selves: &mut [Self], dst: &mut Stream<R>, tag: u8)
+        -> Option<Result<()>>
+    where Self : Sized {
+        Self::serialize_slice(selves, dst, tag)
     }
 }
 
@@ -180,6 +198,22 @@ impl<T : Serialize> SerializeAs for Vec<T> {
     fn serialize_as_mut(&mut self) -> Option<&mut [T]> { Some(&mut self[..]) }
 }
 
+impl Serialize for u8 {
+    fn serialize_element<R : Write>
+        (&self, dst: &mut Stream<R>, tag: u8)
+        -> Result<()>
+    {
+        dst.write_u8(tag, *self)
+    }
+
+    fn serialize_slice<R : Write>
+        (selves: &[u8], dst: &mut Stream<R>, tag: u8)
+        -> Option<Result<()>>
+    {
+        Some(dst.write_blob_data(tag, selves).map(|_| ()))
+    }
+}
+
 macro_rules! ser_direct {
     ($ty:ty, $meth:ident) => {
         impl Serialize for $ty {
@@ -224,7 +258,6 @@ macro_rules! ser_bytes {
     }
 }
 
-ser_bytes!(<'a> Serialize for [u8]);
 ser_bytes!(Serialize for String);
 ser_bytes!(Serialize for str);
 
@@ -355,6 +388,53 @@ ser_tuple!(F0 : 0, F1 : 1, F2 : 2, F3 : 3, F4 : 4, F5 : 5, F6 : 6,
            F7 : 7, F8 : 8, F9 : 9, F10 : 10, F11 : 11, F12 : 12, F13 : 13,
            F14 : 14, F15 : 15);
 
+impl <T : Serialize> Serialize for [T] {
+    fn serialize_field<R : Write>(&self, dst: &mut Stream<R>, tag: u8)
+                                  -> Result<()> {
+        if let Some(handled) = T::serialize_slice(self, dst, tag) {
+            return handled;
+        }
+
+        for e in self {
+            e.serialize_element(dst, tag)?;
+        }
+        Ok(())
+    }
+
+    fn serialize_element<R : Write>(&self, dst: &mut Stream<R>, tag: u8)
+                                    -> Result<()> {
+        if let Some(handled) = T::serialize_slice(self, dst, tag) {
+            return handled;
+        }
+
+        dst.write_struct(tag)?;
+        self.serialize_field(dst, 1)?;
+        dst.write_end_struct()
+    }
+
+    fn serialize_field_mut<R : Write>(&mut self, dst: &mut Stream<R>, tag: u8)
+                                      -> Result<()> {
+        if let Some(handled) = T::serialize_slice_mut(self, dst, tag) {
+            return handled;
+        }
+
+        for e in self {
+            e.serialize_element_mut(dst, tag)?;
+        }
+        Ok(())
+    }
+    fn serialize_element_mut<R : Write>(&mut self, dst: &mut Stream<R>, tag: u8)
+                                        -> Result<()> {
+        if let Some(handled) = T::serialize_slice_mut(self, dst, tag) {
+            return handled;
+        }
+
+        dst.write_struct(tag)?;
+        self.serialize_field_mut(dst, 1)?;
+        dst.write_end_struct()
+    }
+}
+
 macro_rules! ser_iter_mut {
     ($($stuff:tt)*) => {
 impl $($stuff)* {
@@ -390,7 +470,6 @@ impl $($stuff)* {
 }
 }
 
-ser_iter_mut!(<T : Serialize> Serialize for [T]);
 ser_iter_mut!(<T : Serialize> Serialize for ::std::collections::LinkedList<T>);
 ser_iter_mut!(<T : Serialize> Serialize for ::std::collections::VecDeque<T>);
 ser_iter_mut!(<T : Serialize> Serialize for Option<T>);
