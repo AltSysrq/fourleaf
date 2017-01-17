@@ -23,8 +23,15 @@ pub mod de;
 #[cfg(test)] mod ser_des_builtin_tests;
 #[cfg(test)] mod test_helpers;
 
+pub use self::de::Config as DeConfig;
+pub use self::de::Deserialize;
+pub use self::de::from_reader;
+pub use self::de::from_slice_borrow;
+pub use self::de::from_slice_copy;
+pub use self::de::from_stream_borrow;
+pub use self::de::from_stream_copy;
+pub use self::ser::Serialize;
+pub use self::ser::to_stream;
+pub use self::ser::to_vec;
+pub use self::ser::to_writer;
 pub use self::stream::Stream;
-pub use self::de::{Deserialize, Config as DeConfig, from_stream_copy,
-                   from_stream_borrow, from_reader, from_slice_copy,
-                   from_slice_borrow};
-pub use self::ser::{Serialize, to_vec, to_writer, to_stream};
