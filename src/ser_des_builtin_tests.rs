@@ -7,6 +7,7 @@
 // option. This file may not be copied, modified, or distributed
 // except according to those terms.
 
+use std::borrow::Cow;
 use std::collections::*;
 use std::io::Read;
 use std::rc::Rc;
@@ -353,5 +354,47 @@ fn binary_heap_basically_works() {
                 &context, &mut stream).unwrap();
         assert_eq!(1, res.len());
         assert_eq!(5, res.pop().unwrap());
+    }
+}
+
+#[test]
+fn cow_desers_according_to_style() {
+    let orig: Cow<str> = Cow::Borrowed("hello world");
+    let mut encoded = Vec::new();
+    {
+        let mut stream = Stream::new(&mut encoded);
+        orig.serialize_top_level(&mut stream).unwrap();
+        stream.commit().unwrap();
+    }
+
+    assert_eq!(parse("81 0B 'hello world' 00"), encoded);
+
+    let config = Config::default();
+    let context = Context {
+        config: &config,
+        next: None,
+        field: "",
+        pos: 0,
+        depth: 0,
+    };
+    {
+        let mut stream = Stream::from_slice(&encoded[..]);
+        let res: Cow<'static, str> =
+            Deserialize::<_, style::Copying>::deserialize_top_level(
+                &context, &mut stream).unwrap();
+        match res {
+            Cow::Owned(s) => assert_eq!("hello world", s),
+            Cow::Borrowed(_) => panic!("somehow borrowed 'static?"),
+        }
+    }
+    {
+        let mut stream = Stream::from_slice(&encoded[..]);
+        let res: Cow<str> =
+            Deserialize::<_, style::ZeroCopy>::deserialize_top_level(
+                &context, &mut stream).unwrap();
+        match res {
+            Cow::Owned(_) => panic!("copied instead of borrowing"),
+            Cow::Borrowed(s) => assert_eq!("hello world", s),
+        }
     }
 }
