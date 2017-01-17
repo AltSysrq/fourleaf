@@ -197,7 +197,6 @@ tcase!(ce_byte_array (Vec<[u8;4]> [Copying ZeroCopy]: vec![[0, 1, 2, 3]] =>
                       "81 04 00 01 02 03 00"));
 
 // Empty collections
-// TODO Need to test `BinaryHeap` specially since it is not `PartialEq`.
 tcase!(tl_e_option (Option<u32> [Copying ZeroCopy]: None => "00"));
 tcase!(tl_e_vec (Vec<u32> [Copying ZeroCopy]: vec![] => "00"));
 tcase!(tl_e_vd (VecDeque<u32> [Copying ZeroCopy]: vd![] => "00"));
@@ -324,3 +323,35 @@ tcase!(ce_rc (Vec<Rc<u32>> [Copying ZeroCopy]: vec![Rc::new(5)] =>
               "41 05 00"));
 tcase!(ce_arc (Vec<Arc<u32>> [Copying ZeroCopy]: vec![Arc::new(5)] =>
                "41 05 00"));
+
+#[test]
+fn binary_heap_basically_works() {
+    // Not as thorough as the others, but it uses the same macro and so should
+    // work the same regardless.
+    let orig: BinaryHeap<u32> = bh![5];
+    let mut encoded = Vec::new();
+    {
+        let mut stream = Stream::new(&mut encoded);
+        orig.serialize_top_level(&mut stream).unwrap();
+        stream.commit().unwrap();
+    }
+
+    assert_eq!(parse("41 05 00"), encoded);
+
+    let config = Config::default();
+    let context = Context {
+        config: &config,
+        next: None,
+        field: "",
+        pos: 0,
+        depth: 0,
+    };
+    {
+        let mut stream = Stream::from_slice(&encoded[..]);
+        let mut res: BinaryHeap<u32> =
+            Deserialize::<_, style::Copying>::deserialize_top_level(
+                &context, &mut stream).unwrap();
+        assert_eq!(1, res.len());
+        assert_eq!(5, res.pop().unwrap());
+    }
+}
