@@ -52,6 +52,46 @@ macro_rules! tcase {
     }
 }
 
+macro_rules! ll {
+    ($($val:expr),*) => {{
+        let mut _ll = LinkedList::new();
+        $(_ll.push_back($val);)*
+        _ll
+    }}
+}
+
+macro_rules! vd {
+    ($($val:expr),*) => {{
+        let mut _vd = VecDeque::new();
+        $(_vd.push_back($val);)*
+        _vd
+    }}
+}
+
+macro_rules! bts {
+    ($($val:expr),*) => {{
+        let mut _bts = BTreeSet::new();
+        $(_bts.insert($val);)*
+        _bts
+    }}
+}
+
+macro_rules! hs {
+    ($($val:expr),*) => {{
+        let mut _hs = HashSet::new();
+        $(_hs.insert($val);)*
+        _hs
+    }}
+}
+
+macro_rules! bh {
+    ($($val:expr),*) => {{
+        let mut _bh = BinaryHeap::new();
+        $(_bh.push($val);)*
+        _bh
+    }}
+}
+
 // There are generally 3 cases for everything: top-level, as a struct field,
 // and as a collection element.
 
@@ -137,3 +177,85 @@ tcase!(ce_vec_bytes (Vec<Vec<u8>> [Copying ZeroCopy]: vec![vec![42, 255]] =>
                      "81 02 2A FF 00"));
 tcase!(ce_byte_array (Vec<[u8;4]> [Copying ZeroCopy]: vec![[0, 1, 2, 3]] =>
                       "81 04 00 01 02 03 00"));
+
+// Empty collections
+// TODO Need to test `BinaryHeap` specially since it is not `PartialEq`.
+tcase!(tl_e_option (Option<u32> [Copying ZeroCopy]: None => "00"));
+tcase!(tl_e_vec (Vec<u32> [Copying ZeroCopy]: vec![] => "00"));
+tcase!(tl_e_vd (VecDeque<u32> [Copying ZeroCopy]: vd![] => "00"));
+tcase!(tl_e_ll (LinkedList<u32> [Copying ZeroCopy]: ll![] => "00"));
+tcase!(tl_e_bts (BTreeSet<u32> [Copying ZeroCopy]: bts![] => "00"));
+tcase!(tl_e_hs (HashSet<u32> [Copying ZeroCopy]: hs![] => "00"));
+tcase!(tl_e_array ([u32;0] [Copying ZeroCopy]: [] => "00"));
+tcase!(sf_e_option ((Option<u32>,) [Copying ZeroCopy]: (None,) => "00"));
+tcase!(sf_e_vec ((Vec<u32>,) [Copying ZeroCopy]: (vec![],) => "00"));
+tcase!(sf_e_vd ((VecDeque<u32>,) [Copying ZeroCopy]: (vd![],) => "00"));
+tcase!(sf_e_ll ((LinkedList<u32>,) [Copying ZeroCopy]: (ll![],) => "00"));
+tcase!(sf_e_bts ((BTreeSet<u32>,) [Copying ZeroCopy]: (bts![],) => "00"));
+tcase!(sf_e_hs ((HashSet<u32>,) [Copying ZeroCopy]: (hs![],) => "00"));
+tcase!(sf_e_array (([u32;0],) [Copying ZeroCopy]: ([],) => "00"));
+tcase!(ce_e_option (Vec<Option<u32>> [Copying ZeroCopy]: vec![None] =>
+                    "C1 00 00"));
+tcase!(ce_e_vec (Vec<Vec<u32>> [Copying ZeroCopy]: vec![vec![]] =>
+                 "C1 00 00"));
+tcase!(ce_e_vd (Vec<VecDeque<u32>> [Copying ZeroCopy]: vec![vd![]] =>
+                "C1 00 00"));
+tcase!(ce_e_ll (Vec<LinkedList<u32>> [Copying ZeroCopy]: vec![ll![]] =>
+                "C1 00 00"));
+tcase!(ce_e_bts (Vec<BTreeSet<u32>> [Copying ZeroCopy]: vec![bts![]] =>
+                 "C1 00 00"));
+tcase!(ce_e_hs (Vec<HashSet<u32>> [Copying ZeroCopy]: vec![hs![]] =>
+                "C1 00 00"));
+tcase!(te_e_array (Vec<[u32;0]> [Copying ZeroCopy]: vec![[]] =>
+                   "C1 00 00"));
+
+// Populated collections
+tcase!(tl_p_option (Option<u32> [Copying ZeroCopy]: Some(5) => "41 05 00"));
+tcase!(tl_p_vec (Vec<u32> [Copying ZeroCopy]: vec![5, 6] =>
+                 "41 05 41 06 00"));
+tcase!(tl_p_vd (VecDeque<u32> [Copying ZeroCopy]: vd![5, 6] =>
+                "41 05 41 06 00"));
+tcase!(tl_p_ll (LinkedList<u32> [Copying ZeroCopy]: ll![5, 6] =>
+                "41 05 41 06 00"));
+tcase!(tl_p_bts (BTreeSet<u32> [Copying ZeroCopy]: bts![5, 6] =>
+                 "41 05 41 06 00"));
+// Because `HashSet` has nondeterministic order, we only test it with one
+// element here.
+tcase!(tl_p_hs (HashSet<u32> [Copying ZeroCopy]: hs![5] =>
+                "41 05 00"));
+tcase!(tl_p_array ([u32;2] [Copying ZeroCopy]: [5, 6] =>
+                   "41 05 41 06 00"));
+tcase!(sf_p_option ((Option<u32>,) [Copying ZeroCopy]: (Some(5),) =>
+                    "41 05 00"));
+tcase!(sf_p_vec ((Vec<u32>,) [Copying ZeroCopy]: (vec![5, 6],) =>
+                 "41 05 41 06 00"));
+tcase!(sf_p_vd ((VecDeque<u32>,) [Copying ZeroCopy]: (vd![5, 6],) =>
+                "41 05 41 06 00"));
+tcase!(sf_p_ll ((LinkedList<u32>,) [Copying ZeroCopy]: (ll![5, 6],) =>
+                "41 05 41 06 00"));
+tcase!(sf_p_bts ((BTreeSet<u32>,) [Copying ZeroCopy]: (bts![5, 6],) =>
+                 "41 05 41 06 00"));
+tcase!(sf_p_hs ((HashSet<u32>,) [Copying ZeroCopy]: (hs![5],) =>
+                "41 05 00"));
+tcase!(sf_p_array (([u32;2],) [Copying ZeroCopy]: ([5,6],) =>
+                   "41 05 41 06 00"));
+tcase!(ce_p_option (Vec<Option<u32>> [Copying ZeroCopy]:
+                    vec![Some(5), Some(6)] => "C1 41 05 00 C1 41 06 00 00"));
+tcase!(ce_p_vec (Vec<Vec<u32>> [Copying ZeroCopy]:
+                 vec![vec![5, 6], vec![7, 8]] =>
+                 "C1 41 05 41 06 00 C1 41 07 41 08 00 00"));
+tcase!(ce_p_vd (Vec<VecDeque<u32>> [Copying ZeroCopy]:
+                vec![vd![5, 6], vd![7, 8]] =>
+                 "C1 41 05 41 06 00 C1 41 07 41 08 00 00"));
+tcase!(ce_p_ll (Vec<LinkedList<u32>> [Copying ZeroCopy]:
+                vec![ll![5, 6], ll![7, 8]] =>
+                 "C1 41 05 41 06 00 C1 41 07 41 08 00 00"));
+tcase!(ce_p_bts (Vec<BTreeSet<u32>> [Copying ZeroCopy]:
+                vec![bts![5, 6], bts![7, 8]] =>
+                 "C1 41 05 41 06 00 C1 41 07 41 08 00 00"));
+tcase!(ce_p_hs (Vec<HashSet<u32>> [Copying ZeroCopy]:
+                vec![hs![5], hs![7]] =>
+                 "C1 41 05 00 C1 41 07 00 00"));
+tcase!(ce_p_array (Vec<[u32;2]> [Copying ZeroCopy]:
+                vec![[5, 6], [7, 8]] =>
+                 "C1 41 05 41 06 00 C1 41 07 41 08 00 00"));

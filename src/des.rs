@@ -1222,6 +1222,35 @@ des_push_seq!((impl<R : Read, STYLE, T : Deserialize<R, STYLE> + Ord>
                Deserialize<R, STYLE> for ::std::collections::BinaryHeap<T>);
               push);
 
+impl<R : Read, STYLE, T : Deserialize<R, STYLE>> Deserialize<R, STYLE>
+for Option<T> {
+    type Accum = Self;
+
+    fn deserialize_element
+        (context: &Context, field: &mut stream::Field<R>) -> Result<Self>
+    {
+        Self::deserialize_top_level(
+            context, field.value.to_struct().context(context)?)
+    }
+
+    fn deserialize_field
+        (accum: &mut Self, context: &Context,
+         field: &mut stream::Field<R>) -> Result<()>
+    {
+        if accum.is_some() {
+            Err(Error::FieldOccursTooManyTimes(
+                context.to_string(), 1))
+        } else {
+            *accum = Some(T::deserialize_element(context, field)?);
+            Ok(())
+        }
+    }
+
+    fn finish(accum: Self, _: &Context) -> Result<Self> {
+        Ok(accum)
+    }
+}
+
 macro_rules! des_map {
     ($($stuff:tt)*) => {
 $($stuff)* {
