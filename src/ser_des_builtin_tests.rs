@@ -92,6 +92,22 @@ macro_rules! bh {
     }}
 }
 
+macro_rules! btm {
+    ($($key:expr => $val:expr),*) => {{
+        let mut _btm = BTreeMap::new();
+        $(_btm.insert($key, $val);)*
+        _btm
+    }}
+}
+
+macro_rules! hm {
+    ($($key:expr => $val:expr),*) => {{
+        let mut _hm = HashMap::new();
+        $(_hm.insert($key, $val);)*
+        _hm
+    }}
+}
+
 // There are generally 3 cases for everything: top-level, as a struct field,
 // and as a collection element.
 
@@ -259,3 +275,33 @@ tcase!(ce_p_hs (Vec<HashSet<u32>> [Copying ZeroCopy]:
 tcase!(ce_p_array (Vec<[u32;2]> [Copying ZeroCopy]:
                 vec![[5, 6], [7, 8]] =>
                  "C1 41 05 41 06 00 C1 41 07 41 08 00 00"));
+
+// Empty maps
+tcase!(tl_e_btm (BTreeMap<u32,u32> [Copying ZeroCopy]: btm![] => "00"));
+tcase!(tl_e_hm (HashMap<u32,u32> [Copying ZeroCopy]: hm![] => "00"));
+tcase!(sf_e_btm ((BTreeMap<u32,u32>,) [Copying ZeroCopy]: (btm![],) => "00"));
+tcase!(sf_e_hm ((HashMap<u32,u32>,) [Copying ZeroCopy]: (hm![],) => "00"));
+tcase!(ce_e_btm (Vec<BTreeMap<u32,u32>> [Copying ZeroCopy]: vec![btm![]] =>
+                 "C1 00 00"));
+tcase!(ce_e_hm (Vec<HashMap<u32,u32>> [Copying ZeroCopy]: vec![hm![]] =>
+                "C1 00 00"));
+
+// Populated maps. As with `HashSet`, we only put one pair in `HashMap` since
+// order is nondeterministic.
+tcase!(tl_p_btm (BTreeMap<u32,u32> [Copying ZeroCopy]:
+                 btm![5 => 6, 7 => 8] =>
+                 "C1 41 05 42 06 00 C1 41 07 42 08 00 00"));
+tcase!(tl_p_hm (HashMap<u32,u32> [Copying ZeroCopy]: hm![5 => 6] =>
+                "C1 41 05 42 06 00 00"));
+tcase!(sf_p_btm ((BTreeMap<u32,u32>,) [Copying ZeroCopy]:
+                  (btm![5 => 6, 7 => 8],) =>
+                  "C1 41 05 42 06 00 C1 41 07 42 08 00 00"));
+tcase!(sf_p_hm ((HashMap<u32,u32>,) [Copying ZeroCopy]: (hm![5 => 6],) =>
+                 "C1 41 05 42 06 00 00"));
+tcase!(ce_p_btm (Vec<BTreeMap<u32,u32>> [Copying ZeroCopy]:
+                 vec![btm![1 => 2, 3 => 4], btm![5 => 6, 7 => 8]] =>
+                 "C1 C1 41 01 42 02 00 C1 41 03 42 04 00 00 \
+                  C1 C1 41 05 42 06 00 C1 41 07 42 08 00 00 00"));
+tcase!(ce_p_hm (Vec<HashMap<u32,u32>> [Copying ZeroCopy]:
+                vec![hm![5 => 6], hm![7 => 8]] =>
+                "C1 C1 41 05 42 06 00 00 C1 C1 41 07 42 08 00 00 00"));
