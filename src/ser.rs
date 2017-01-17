@@ -51,11 +51,6 @@ pub fn to_stream<T : Serialize, R : Write>(stream: &mut Stream<R>,
 }
 
 /// Trait for serialising values via fourleaf.
-///
-/// Methods come in `_mut` and non-mutable variants. The mutable variants are
-/// intended for functionality like storing byte offsets. By default, all
-/// `_mut` methods simply delegate to the corresponding non-mutable one, so an
-/// implementation overriding one such method should do so with all of them.
 pub trait Serialize {
     /// Serialises this value, which is at top-level.
     ///
@@ -102,29 +97,6 @@ pub trait Serialize {
     where Self : Sized {
         None
     }
-
-    /// The mutable variant of `serialize_top_level`.
-    fn serialize_top_level_mut<R : Write>(&mut self, dst: &mut Stream<R>)
-                                          -> Result<()> {
-        self.serialize_top_level(dst)
-    }
-    /// The mutable variant of `serialize_field`.
-    fn serialize_field_mut<R : Write>(&mut self, dst: &mut Stream<R>, tag: u8)
-                                      -> Result<()> {
-        self.serialize_field(dst, tag)
-    }
-    /// The mutable variant of `serialize_element`.
-    fn serialize_element_mut<R : Write>(&mut self, dst: &mut Stream<R>, tag: u8)
-                                        -> Result<()> {
-        self.serialize_element(dst, tag)
-    }
-    /// The mutable variant of `serialize_slice`.
-    fn serialize_slice_mut<R : Write>
-        (selves: &mut [Self], dst: &mut Stream<R>, tag: u8)
-        -> Option<Result<()>>
-    where Self : Sized {
-        Self::serialize_slice(selves, dst, tag)
-    }
 }
 
 /// If implemented, provides a blanket implementation of `Serialize` to
@@ -135,13 +107,6 @@ pub trait SerializeAs {
 
     /// Returns the value to be serialised in lieu of `self`.
     fn serialize_as(&self) -> &Self::T;
-    /// Returns the value to be mutably serialised in lieu of `self`.
-    ///
-    /// If it returns `None`, the `_mut` methods instead delegate to the
-    /// non-mutable ones.
-    ///
-    /// By default returns `None`.
-    fn serialize_as_mut(&mut self) -> Option<&mut Self::T> { None }
 }
 
 impl<T : SerializeAs + ?Sized> Serialize for T {
@@ -158,27 +123,6 @@ impl<T : SerializeAs + ?Sized> Serialize for T {
         self.serialize_as().serialize_element(dst, tag)
     }
 
-    fn serialize_top_level_mut<R : Write>(&mut self, dst: &mut Stream<R>)
-                                          -> Result<()> {
-        if let Some(s) = self.serialize_as_mut() {
-            return s.serialize_top_level_mut(dst);
-        }
-        self.serialize_top_level(dst)
-    }
-    fn serialize_field_mut<R : Write>(&mut self, dst: &mut Stream<R>, tag: u8)
-                                      -> Result<()> {
-        if let Some(s) = self.serialize_as_mut() {
-            return s.serialize_field_mut(dst, tag);
-        }
-        self.serialize_field(dst, tag)
-    }
-    fn serialize_element_mut<R : Write>(&mut self, dst: &mut Stream<R>, tag: u8)
-                                        -> Result<()> {
-        if let Some(s) = self.serialize_as_mut() {
-            return s.serialize_element_mut(dst, tag);
-        }
-        self.serialize_element(dst, tag)
-    }
 }
 
 impl Serialize for () {
@@ -204,13 +148,11 @@ impl<'a, T : 'a + ?Sized + Serialize> SerializeAs for &'a mut T {
     type T = T;
 
     fn serialize_as(&self) -> &T { *self }
-    fn serialize_as_mut(&mut self) -> Option<&mut T> { Some(*self) }
 }
 impl<T : ?Sized + Serialize> SerializeAs for Box<T> {
     type T = T;
 
     fn serialize_as(&self) -> &T { &*self }
-    fn serialize_as_mut(&mut self) -> Option<&mut T> { Some(&mut*self) }
 }
 impl<T : ?Sized + Serialize> SerializeAs for ::std::rc::Rc<T> {
     type T = T;
@@ -232,7 +174,6 @@ impl<T : Serialize> SerializeAs for Vec<T> {
     type T = [T];
 
     fn serialize_as(&self) -> &[T] { &self[..] }
-    fn serialize_as_mut(&mut self) -> Option<&mut [T]> { Some(&mut self[..]) }
 }
 
 impl Serialize for u8 {
@@ -304,9 +245,6 @@ macro_rules! ser_array {
             type T = [T];
             fn serialize_as(&self) -> &[T] {
                 &self[..]
-            }
-            fn serialize_as_mut(&mut self) -> Option<&mut [T]> {
-                Some(&mut self[..])
             }
         }
     }
@@ -380,20 +318,6 @@ macro_rules! ser_tuple {
                 dst.write_struct(tag)?;
                 self.serialize_top_level(dst)
             }
-
-            fn serialize_top_level_mut<R : Write>
-                (&mut self, dst: &mut Stream<R>) -> Result<()>
-            {
-                $(self.$v.serialize_field_mut(dst, $v + 1)?;)*
-                dst.write_end_struct()
-            }
-
-            fn serialize_element_mut<R : Write>
-                (&mut self, dst: &mut Stream<R>, tag: u8) -> Result<()>
-            {
-                dst.write_struct(tag)?;
-                self.serialize_top_level_mut(dst)
-            }
         }
     }
 }
@@ -448,28 +372,6 @@ impl <T : Serialize> Serialize for [T] {
         self.serialize_field(dst, 1)?;
         dst.write_end_struct()
     }
-
-    fn serialize_field_mut<R : Write>(&mut self, dst: &mut Stream<R>, tag: u8)
-                                      -> Result<()> {
-        if let Some(handled) = T::serialize_slice_mut(self, dst, tag) {
-            return handled;
-        }
-
-        for e in self {
-            e.serialize_element_mut(dst, tag)?;
-        }
-        Ok(())
-    }
-    fn serialize_element_mut<R : Write>(&mut self, dst: &mut Stream<R>, tag: u8)
-                                        -> Result<()> {
-        if let Some(handled) = T::serialize_slice_mut(self, dst, tag) {
-            return handled;
-        }
-
-        dst.write_struct(tag)?;
-        self.serialize_field_mut(dst, 1)?;
-        dst.write_end_struct()
-    }
 }
 
 macro_rules! ser_iter_mut {
@@ -487,20 +389,6 @@ impl $($stuff)* {
                                     -> Result<()> {
         dst.write_struct(tag)?;
         self.serialize_field(dst, 1)?;
-        dst.write_end_struct()
-    }
-
-    fn serialize_field_mut<R : Write>(&mut self, dst: &mut Stream<R>, tag: u8)
-                                      -> Result<()> {
-        for e in self {
-            e.serialize_element_mut(dst, tag)?;
-        }
-        Ok(())
-    }
-    fn serialize_element_mut<R : Write>(&mut self, dst: &mut Stream<R>, tag: u8)
-                                        -> Result<()> {
-        dst.write_struct(tag)?;
-        self.serialize_field_mut(dst, 1)?;
         dst.write_end_struct()
     }
 }
@@ -560,24 +448,6 @@ impl $($stuff)* {
         self.serialize_field(dst, 1)?;
         dst.write_end_struct()
     }
-
-    fn serialize_field_mut<R : Write>(&mut self, dst: &mut Stream<R>, tag: u8)
-                                      -> Result<()> {
-        for (k, v) in self.iter_mut() {
-            dst.write_struct(tag)?;
-            k.serialize_field(dst, 1)?;
-            v.serialize_field_mut(dst, 2)?;
-            dst.write_end_struct()?;
-        }
-        Ok(())
-    }
-    fn serialize_element_mut<R : Write>(&mut self, dst: &mut Stream<R>, tag: u8)
-                                        -> Result<()> {
-        dst.write_struct(tag)?;
-        self.serialize_field_mut(dst, 1)?;
-        dst.write_end_struct()
-    }
-
 }
 }
 }
