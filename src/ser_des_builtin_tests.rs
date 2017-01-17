@@ -9,6 +9,8 @@
 
 use std::collections::*;
 use std::io::Read;
+use std::rc::Rc;
+use std::sync::Arc;
 
 use des::*;
 use ser::*;
@@ -305,3 +307,20 @@ tcase!(ce_p_btm (Vec<BTreeMap<u32,u32>> [Copying ZeroCopy]:
 tcase!(ce_p_hm (Vec<HashMap<u32,u32>> [Copying ZeroCopy]:
                 vec![hm![5 => 6], hm![7 => 8]] =>
                 "C1 C1 41 05 42 06 00 00 C1 C1 41 07 42 08 00 00 00"));
+
+// Boxed items
+tcase!(tl_box (Box<u32> [Copying ZeroCopy]: Box::new(5) => "41 05 00"));
+tcase!(tl_rc (Rc<u32> [Copying ZeroCopy]: Rc::new(5) => "41 05 00"));
+tcase!(tl_arc (Arc<u32> [Copying ZeroCopy]: Arc::new(5) => "41 05 00"));
+tcase!(sf_box (((),Box<u32>) [Copying ZeroCopy]: ((),Box::new(5)) =>
+               "01 42 05 00"));
+tcase!(sf_rc (((),Rc<u32>) [Copying ZeroCopy]: ((),Rc::new(5)) =>
+              "01 42 05 00"));
+tcase!(sf_arc (((),Arc<u32>) [Copying ZeroCopy]: ((),Arc::new(5)) =>
+               "01 42 05 00"));
+tcase!(ce_box (Vec<Box<u32>> [Copying ZeroCopy]: vec![Box::new(5)] =>
+               "41 05 00"));
+tcase!(ce_rc (Vec<Rc<u32>> [Copying ZeroCopy]: vec![Rc::new(5)] =>
+              "41 05 00"));
+tcase!(ce_arc (Vec<Arc<u32>> [Copying ZeroCopy]: vec![Arc::new(5)] =>
+               "41 05 00"));
