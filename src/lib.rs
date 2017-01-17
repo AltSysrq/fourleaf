@@ -18,7 +18,13 @@ pub mod io;
 pub mod wire;
 pub mod stream;
 pub mod ser;
-pub mod des;
+pub mod de;
 
 #[cfg(test)] mod ser_des_builtin_tests;
 #[cfg(test)] mod test_helpers;
+
+pub use self::stream::Stream;
+pub use self::de::{Deserialize, Config as DeConfig, from_stream_copy,
+                   from_stream_borrow, from_reader, from_slice_copy,
+                   from_slice_borrow};
+pub use self::ser::{Serialize, to_vec, to_writer, to_stream};

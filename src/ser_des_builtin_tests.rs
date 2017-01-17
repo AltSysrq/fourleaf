@@ -13,7 +13,7 @@ use std::io::Read;
 use std::rc::Rc;
 use std::sync::Arc;
 
-use des::*;
+use de::*;
 use ser::*;
 use stream::Stream;
 use test_helpers::parse;
@@ -38,13 +38,7 @@ macro_rules! tcase {
                     (stream: &mut Stream<R>) -> T
                 {
                     let config = Config::default();
-                    let context = Context {
-                        config: &config,
-                        next: None,
-                        field: "",
-                        pos: 0,
-                        depth: 0,
-                    };
+                    let context = Context::top(&config);
                     T::deserialize_top_level(&context, stream).unwrap()
                 }
 
@@ -340,58 +334,30 @@ fn binary_heap_basically_works() {
     assert_eq!(parse("41 05 00"), encoded);
 
     let config = Config::default();
-    let context = Context {
-        config: &config,
-        next: None,
-        field: "",
-        pos: 0,
-        depth: 0,
-    };
-    {
-        let mut stream = Stream::from_slice(&encoded[..]);
-        let mut res: BinaryHeap<u32> =
-            Deserialize::<_, style::Copying>::deserialize_top_level(
-                &context, &mut stream).unwrap();
-        assert_eq!(1, res.len());
-        assert_eq!(5, res.pop().unwrap());
-    }
+    let mut res: BinaryHeap<u32> = from_slice_copy(&encoded, &config).unwrap();
+    assert_eq!(1, res.len());
+    assert_eq!(5, res.pop().unwrap());
 }
 
 #[test]
 fn cow_desers_according_to_style() {
     let orig: Cow<str> = Cow::Borrowed("hello world");
-    let mut encoded = Vec::new();
-    {
-        let mut stream = Stream::new(&mut encoded);
-        orig.serialize_top_level(&mut stream).unwrap();
-        stream.commit().unwrap();
-    }
+    let encoded = to_vec(&orig).unwrap();
 
     assert_eq!(parse("81 0B 'hello world' 00"), encoded);
 
     let config = Config::default();
-    let context = Context {
-        config: &config,
-        next: None,
-        field: "",
-        pos: 0,
-        depth: 0,
-    };
     {
-        let mut stream = Stream::from_slice(&encoded[..]);
         let res: Cow<'static, str> =
-            Deserialize::<_, style::Copying>::deserialize_top_level(
-                &context, &mut stream).unwrap();
+            from_slice_copy(&encoded, &config).unwrap();
         match res {
             Cow::Owned(s) => assert_eq!("hello world", s),
             Cow::Borrowed(_) => panic!("somehow borrowed 'static?"),
         }
     }
     {
-        let mut stream = Stream::from_slice(&encoded[..]);
         let res: Cow<str> =
-            Deserialize::<_, style::ZeroCopy>::deserialize_top_level(
-                &context, &mut stream).unwrap();
+            from_slice_borrow(&encoded, &config).unwrap();
         match res {
             Cow::Owned(_) => panic!("copied instead of borrowing"),
             Cow::Borrowed(s) => assert_eq!("hello world", s),

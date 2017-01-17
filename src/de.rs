@@ -20,8 +20,91 @@ use std::usize;
 
 use quick_error::ResultExt;
 
-use io::AsExtBytes;
+use io::{AsExtBytes, TransparentCursor};
 use stream;
+
+/// Deserialises an instance of `T` from the given `stream`.
+///
+/// Byte arrays will always be copied into new buffers independent of `stream`
+/// or its underlying reader.
+///
+/// On success, `stream` will be left positioned immediately after the value
+/// that was read, allowing for another immediately following value to be read
+/// in with another call to this function.
+pub fn from_stream_copy<R : Read, T : Deserialize<R, style::Copying>>
+    (stream: &mut stream::Stream<R>, config: &Config) -> Result<T>
+{
+    T::deserialize_top_level(&Context::top(config), stream)
+}
+
+/// Deserialises an instance of `T` from the given `stream`.
+///
+/// Byte arrays will be borrowed from the underlying reader when the type to
+/// be deserialised supports it.
+///
+/// If `T` actually contains anything supporting zero-copy deserialisation, `R`
+/// often effectively must be `AsExtBytes` as well.
+///
+/// On success, `stream` will be left positioned immediately after the value
+/// that was read, allowing for another immediately following value to be read
+/// in with another call to this function.
+pub fn from_stream_borrow<R : Read, T : Deserialize<R, style::ZeroCopy>>
+    (stream: &mut stream::Stream<R>, config: &Config) -> Result<T>
+{
+    T::deserialize_top_level(&Context::top(config), stream)
+}
+
+/// Deserialises an instance of `T` from the given `reader`.
+///
+/// Byte arrays will be copied into new buffers independent of `reader`.
+///
+/// This constructs a `Stream` with its default properties. If different
+/// properties are desired, construct a `Stream` manually and then call one of
+/// the `from_stream_*` functions.
+///
+/// On success, `reader` will be left positioned immediately after the value
+/// that was read, allowing for another immediately following value to be read
+/// in with another call to this function.
+pub fn from_reader<R : Read, T : Deserialize<R, style::Copying>>
+    (reader: R, config: &Config) -> Result<T>
+{
+    let mut stream = stream::Stream::new(reader);
+    T::deserialize_top_level(&Context::top(config), &mut stream)
+}
+
+/// Deserialises an instance of `T` from the given byte slice.
+///
+/// Byte arrays will be copied into new buffers independent of `bytes`. Use
+/// `from_slice_borrow` to instead borrow from `bytes`.
+///
+/// This constructs a `Stream` with its default properties. Additionally,
+/// unconsumed bytes beyond the deserialised value are ignored. If either of
+/// these is undesirable, construct a `Stream` manually with
+/// `Stream::from_slice` and then call one of the `from_stream_*` methods.
+pub fn from_slice_copy<'a, T : Deserialize<TransparentCursor<&'a [u8]>,
+                                           style::Copying>>
+    (bytes: &'a [u8], config: &Config) -> Result<T>
+{
+    let mut stream = stream::Stream::from_slice(bytes);
+    T::deserialize_top_level(&Context::top(config), &mut stream)
+}
+
+/// Deserialises an instance of `T` from the given byte slice.
+///
+/// Byte arrays will be borrowed from the underlying reader when the type to
+/// be deserialised supports it.
+///
+/// This constructs a `Stream` with its default properties. Additionally,
+/// unconsumed bytes beyond the deserialised value are ignored. If either of
+/// these is undesirable, construct a `Stream` manually with
+/// `Stream::from_slice` and then call one of the `from_stream_*` methods.
+pub fn from_slice_borrow<'a, T : Deserialize<TransparentCursor<&'a [u8]>,
+                                             style::ZeroCopy>>
+    (bytes: &'a [u8], config: &Config) -> Result<T>
+{
+    let mut stream = stream::Stream::from_slice(bytes);
+    T::deserialize_top_level(&Context::top(config), &mut stream)
+}
 
 quick_error! {
     /// Errors that can be produced during deserialisation.
@@ -118,6 +201,7 @@ pub struct Config {
     ///
     /// The default is 256.
     pub max_collect: usize,
+    _non_public: (),
 }
 
 impl Default for Config {
@@ -127,6 +211,7 @@ impl Default for Config {
             ignore_unknown_fields: true,
             max_blob: 65536,
             max_collect: 256,
+            _non_public: (),
         }
     }
 }
@@ -155,9 +240,22 @@ pub struct Context<'a> {
     /// The configuration to use when deserialising this level's immediate
     /// children.
     pub config: &'a Config,
+    _non_public: (),
 }
 
 impl<'a> Context<'a> {
+    /// Returns a "top-level" context referencing the given config.
+    pub fn top(config: &'a Config) -> Self {
+        Context {
+            next: None,
+            field: "",
+            pos: 0,
+            depth: 0,
+            config: config,
+            _non_public: (),
+        }
+    }
+
     /// Creates a context subordinate to this one for the given field, provided
     /// it does not exceed the recursion limit.
     pub fn push(&'a self, field: &'a str, pos: u64) -> Result<Self> {
@@ -170,6 +268,7 @@ impl<'a> Context<'a> {
                 pos: pos,
                 depth: self.depth + 1,
                 config: self.config,
+                _non_public: (),
             })
         }
     }

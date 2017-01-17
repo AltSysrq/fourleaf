@@ -13,6 +13,43 @@ use std::io::Write;
 
 use stream::{Result, Stream};
 
+/// Serialises `t` into a `Vec<u8>`.
+pub fn to_vec<T : Serialize>(t: T) -> Result<Vec<u8>> {
+    let mut stream = Stream::new(Vec::new());
+    t.serialize_top_level(&mut stream)?;
+    stream.commit()?;
+    Ok(stream.into_inner())
+}
+
+/// Serialises `t` and writes it to `writer`.
+///
+/// This can be called multiple times in succession to write multiple values,
+/// which can later be read by sequential calls to the corresponding
+/// deserialisation functions.
+///
+/// This creates a `Stream` with its default properties. If this is not
+/// desired, create a `Stream` manually and pass it to `to_stream`.
+pub fn to_writer<T : Serialize, W : Write>(writer: &mut W, t: T)
+                                           -> Result<()> {
+    let mut stream = Stream::new(writer);
+    t.serialize_top_level(&mut stream)?;
+    stream.commit()?;
+    Ok(())
+}
+
+/// Serialises `t` to `stream`.
+///
+/// This can be called multiple times in succession to write multiple values,
+/// which can later be read by sequential calls to the corresponding
+/// deserialisation functions.
+pub fn to_stream<T : Serialize, R : Write>(stream: &mut Stream<R>,
+                                           t: T)
+                                           -> Result<()> {
+    t.serialize_top_level(stream)?;
+    stream.commit()?;
+    Ok(())
+}
+
 /// Trait for serialising values via fourleaf.
 ///
 /// Methods come in `_mut` and non-mutable variants. The mutable variants are
