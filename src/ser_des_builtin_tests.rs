@@ -15,7 +15,7 @@ use std::sync::Arc;
 
 use de::*;
 use ser::*;
-use stream::Stream;
+use stream::{self, Stream};
 use test_helpers::parse;
 
 macro_rules! tcase {
@@ -364,3 +364,71 @@ fn cow_desers_according_to_style() {
         }
     }
 }
+
+#[test]
+fn unknown_fields_ignored_by_default() {
+    let data = parse("41 01 42 02 00");
+    let res = from_slice_copy::<(u32,)>(&data, &Config::default()).unwrap();
+    assert_eq!((1,), res);
+}
+
+macro_rules! ecase {
+    ($name:ident ($config:ident $input:expr => $ty:ty : $err:pat)
+     $config_edits:block) => {
+        #[test] #[allow(unused_mut)]
+        fn $name() {
+            let data = parse($input);
+            let mut $config = Config::default();
+            $config_edits;
+            match from_slice_copy::<$ty>(&data, &$config) {
+                Ok(_) => panic!("unexpectedly succeeded"),
+                Err($err) => (),
+                Err(e) => panic!("failed for wrong reason: {}", e),
+            }
+        }
+    }
+}
+
+ecase!(tuple_field_not_populated (config "00" => (u32,) :
+                                  Error::RequiredFieldMissing(_)) { });
+ecase!(recursion_limit_exceeded (config "C1 C1 C1 C1 C1 C1 C1 C1" =>
+                                 Vec<Vec<Vec<Vec<Vec<u32>>>>> :
+                                 Error::RecursionLimitExceeded(_))
+       { config.recursion_limit = 4; });
+
+ecase!(max_collect_exceeded_on_vec
+       (config "4100 4100 4100 4100 4100 4100" => Vec<u32> :
+        Error::MaxCollectExceeded(_))
+       { config.max_collect = 4; });
+
+ecase!(max_collect_exceeded_on_hash_map
+       (config "C14100420000 C14101420100 C14102420200 C14103420300 \
+                C14104420400 C14105420500 C14106420600 C14107420700 00"
+        => HashMap<u32, u32> : Error::MaxCollectExceeded(_))
+       { config.max_collect = 4; });
+
+ecase!(max_blob_exceeded (config "81 0B 'hello world' 00" => String :
+                          Error::Stream(_, stream::Error::LargeBlob(..)))
+       { config.max_blob = 5; });
+
+ecase!(unknown_field_rejected (config "42 00 00" => () :
+                               Error::UnknownField(_, 2, 0))
+       { config.ignore_unknown_fields = false; });
+
+ecase!(option_with_two_values (config "41 00 41 01 00" => Option<u32> :
+                               Error::FieldOccursTooManyTimes(_, 1)) { });
+
+ecase!(fixed_array_with_no_values (config "00" => [u32;4] :
+                                   Error::RequiredFieldMissing(_)) { });
+ecase!(fixed_array_with_too_few_values
+       (config "41 00 41 01 00" => [u32;4] :
+        Error::FieldOccursTooFewTimes(_, 4)) { });
+ecase!(fixed_array_with_too_many_values
+       (config "41 00 41 01 41 02 41 03 41 04 00" => [u32;4] :
+        Error::FieldOccursTooManyTimes(_, 4)) { });
+
+ecase!(string_invalid_utf8 (config "81 06 'plugh' FF 00" => String :
+                            Error::InvalidValue(..)) { });
+
+ecase!(byte_array_wrong_length (config "81 01 01 00" => [u8;4] :
+                                Error::InvalidValueMsg(..)) { });
