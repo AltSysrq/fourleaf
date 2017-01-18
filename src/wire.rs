@@ -32,7 +32,7 @@ pub struct Descriptor(#[allow(missing_docs)] pub u8);
 #[allow(missing_docs)]
 #[repr(u8)]
 pub enum DescriptorType {
-    Null = 0x00,
+    Enum = 0x00,
     Integer = 0x40,
     Blob = 0x80,
     Struct = 0xC0,
@@ -44,7 +44,7 @@ impl DescriptorType {
         use self::DescriptorType::*;
 
         match ty {
-            0x00 => Null,
+            0x00 => Enum,
             0x40 => Integer,
             0x80 => Blob,
             0xC0 => Struct,
@@ -319,11 +319,11 @@ mod test {
         test!(0x40, ParsedDescriptor::Special(SpecialType::EndOfDoc));
         test!(0x80, ParsedDescriptor::Special(SpecialType::Exception));
         test!(0xC0, ParsedDescriptor::Special(SpecialType::Padding));
-        test!(0x01, ParsedDescriptor::Pair(DescriptorType::Null, 1));
+        test!(0x01, ParsedDescriptor::Pair(DescriptorType::Enum, 1));
         test!(0x41, ParsedDescriptor::Pair(DescriptorType::Integer, 1));
         test!(0x81, ParsedDescriptor::Pair(DescriptorType::Blob, 1));
         test!(0xC1, ParsedDescriptor::Pair(DescriptorType::Struct, 1));
-        test!(0x3F, ParsedDescriptor::Pair(DescriptorType::Null, 63));
+        test!(0x3F, ParsedDescriptor::Pair(DescriptorType::Enum, 63));
         test!(0x7F, ParsedDescriptor::Pair(DescriptorType::Integer, 63));
         test!(0xBF, ParsedDescriptor::Pair(DescriptorType::Blob, 63));
         test!(0xFF, ParsedDescriptor::Pair(DescriptorType::Struct, 63));

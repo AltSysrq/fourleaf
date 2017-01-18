@@ -121,18 +121,18 @@ tcase!(tl_i64   (i64    [Copying ZeroCopy]: 300i64      => "41 D8 04 00"));
 tcase!(tl_u64   (u64    [Copying ZeroCopy]: 300u64      => "41 AC 02 00"));
 tcase!(tl_isize (isize  [Copying ZeroCopy]: 300isize    => "41 D8 04 00"));
 tcase!(tl_usize (usize  [Copying ZeroCopy]: 300usize    => "41 AC 02 00"));
-tcase!(sf_false (((),bool)   [Copying ZeroCopy]: ((),false)       => "01 42 00 00"));
-tcase!(sf_true  (((),bool)   [Copying ZeroCopy]: ((),true)        => "01 42 01 00"));
-tcase!(sf_i8    (((),i8)     [Copying ZeroCopy]: ((),42i8)        => "01 42 54 00"));
-tcase!(sf_u8    (((),u8)     [Copying ZeroCopy]: ((),42u8)        => "01 42 2A 00"));
-tcase!(sf_i16   (((),i16)    [Copying ZeroCopy]: ((),300i16)      => "01 42 D8 04 00"));
-tcase!(sf_u16   (((),u16)    [Copying ZeroCopy]: ((),300u16)      => "01 42 AC 02 00"));
-tcase!(sf_i32   (((),i32)    [Copying ZeroCopy]: ((),300i32)      => "01 42 D8 04 00"));
-tcase!(sf_u32   (((),u32)    [Copying ZeroCopy]: ((),300u32)      => "01 42 AC 02 00"));
-tcase!(sf_i64   (((),i64)    [Copying ZeroCopy]: ((),300i64)      => "01 42 D8 04 00"));
-tcase!(sf_u64   (((),u64)    [Copying ZeroCopy]: ((),300u64)      => "01 42 AC 02 00"));
-tcase!(sf_isize (((),isize)  [Copying ZeroCopy]: ((),300isize)    => "01 42 D8 04 00"));
-tcase!(sf_usize (((),usize)  [Copying ZeroCopy]: ((),300usize)    => "01 42 AC 02 00"));
+tcase!(sf_false (((),bool)   [Copying ZeroCopy]: ((),false)       => "41 00 42 00 00"));
+tcase!(sf_true  (((),bool)   [Copying ZeroCopy]: ((),true)        => "41 00 42 01 00"));
+tcase!(sf_i8    (((),i8)     [Copying ZeroCopy]: ((),42i8)        => "41 00 42 54 00"));
+tcase!(sf_u8    (((),u8)     [Copying ZeroCopy]: ((),42u8)        => "41 00 42 2A 00"));
+tcase!(sf_i16   (((),i16)    [Copying ZeroCopy]: ((),300i16)      => "41 00 42 D8 04 00"));
+tcase!(sf_u16   (((),u16)    [Copying ZeroCopy]: ((),300u16)      => "41 00 42 AC 02 00"));
+tcase!(sf_i32   (((),i32)    [Copying ZeroCopy]: ((),300i32)      => "41 00 42 D8 04 00"));
+tcase!(sf_u32   (((),u32)    [Copying ZeroCopy]: ((),300u32)      => "41 00 42 AC 02 00"));
+tcase!(sf_i64   (((),i64)    [Copying ZeroCopy]: ((),300i64)      => "41 00 42 D8 04 00"));
+tcase!(sf_u64   (((),u64)    [Copying ZeroCopy]: ((),300u64)      => "41 00 42 AC 02 00"));
+tcase!(sf_isize (((),isize)  [Copying ZeroCopy]: ((),300isize)    => "41 00 42 D8 04 00"));
+tcase!(sf_usize (((),usize)  [Copying ZeroCopy]: ((),300usize)    => "41 00 42 AC 02 00"));
 tcase!(ce_false (Vec<bool>   [Copying ZeroCopy]: vec![false]       => "41 00 00"));
 tcase!(ce_true  (Vec<bool>   [Copying ZeroCopy]: vec![true]        => "41 01 00"));
 tcase!(ce_i8    (Vec<i8>     [Copying ZeroCopy]: vec![42i8]        => "41 54 00"));
@@ -148,14 +148,14 @@ tcase!(ce_isize (Vec<isize>  [Copying ZeroCopy]: vec![300isize]    => "41 D8 04 
 tcase!(ce_usize (Vec<usize>  [Copying ZeroCopy]: vec![300usize]    => "41 AC 02 00"));
 
 // Tuples
-tcase!(tl_empty_tuple (() [Copying ZeroCopy]: () => "01 00"));
+tcase!(tl_empty_tuple (() [Copying ZeroCopy]: () => "41 00 00"));
 tcase!(tl_one_tuple ((u32,) [Copying ZeroCopy]: (5,) => "41 05 00"));
 tcase!(tl_two_tuple ((u32,i32) [Copying ZeroCopy]: (5,4) => "41 05 42 08 00"));
-tcase!(sf_empty_tuple (((),()) [Copying ZeroCopy]: ((),()) => "01 02 00"));
-tcase!(sf_one_tuple (((), (u32,)) [Copying ZeroCopy]: ((),(5,)) => "01 C2 41 05 00 00"));
+tcase!(sf_empty_tuple (((),()) [Copying ZeroCopy]: ((),()) => "41 00 42 00 00"));
+tcase!(sf_one_tuple (((), (u32,)) [Copying ZeroCopy]: ((),(5,)) => "41 00 C2 41 05 00 00"));
 tcase!(sf_two_tuple (((),(u32,i32)) [Copying ZeroCopy]: ((),(5,4)) =>
-                     "01 C2 41 05 42 08 00 00"));
-tcase!(ce_empty_tuple (Vec<()> [Copying ZeroCopy]: vec![()] => "01 00"));
+                     "41 00 C2 41 05 42 08 00 00"));
+tcase!(ce_empty_tuple (Vec<()> [Copying ZeroCopy]: vec![()] => "41 00 00"));
 tcase!(ce_one_tuple (Vec<(u32,)> [Copying ZeroCopy]: vec![(5,)] =>
                      "C1 41 05 00 00"));
 tcase!(ce_two_tuple (Vec<(u32,i32)> [Copying ZeroCopy]: vec![(5,4)] =>
@@ -171,15 +171,15 @@ tcase!(tl_vec_bytes (Vec<u8> [Copying ZeroCopy]: vec![42, 255] =>
                      "81 02 2A FF 00"));
 tcase!(tl_byte_array ([u8;4] [Copying ZeroCopy]: [0, 1, 2, 3] =>
                       "81 04 00 01 02 03 00"));
-tcase!(sf_str (((),&str) [ZeroCopy]: ((),"plugh") => "01 82 05 'plugh' 00"));
+tcase!(sf_str (((),&str) [ZeroCopy]: ((),"plugh") => "41 00 82 05 'plugh' 00"));
 tcase!(sf_string (((),String) [Copying ZeroCopy]: ((),"plugh".to_owned()) =>
-                  "01 82 05 'plugh' 00"));
+                  "41 00 82 05 'plugh' 00"));
 tcase!(sf_byte_slice (((),&[u8]) [ZeroCopy]: ((),b"plugh\xff") =>
-                      "01 82 06 'plugh' FF 00"));
+                      "41 00 82 06 'plugh' FF 00"));
 tcase!(sf_vec_bytes (((),Vec<u8>) [Copying ZeroCopy]: ((),vec![42, 255]) =>
-                     "01 82 02 2A FF 00"));
+                     "41 00 82 02 2A FF 00"));
 tcase!(sf_byte_array (((),[u8;4]) [Copying ZeroCopy]: ((),[0, 1, 2, 3]) =>
-                      "01 82 04 00 01 02 03 00"));
+                      "41 00 82 04 00 01 02 03 00"));
 tcase!(ce_str (Vec<&str> [ZeroCopy]: vec!["plugh"] =>
                "81 05 'plugh' 00"));
 tcase!(ce_string (Vec<String> [Copying ZeroCopy]: vec!["plugh".to_owned()] =>
@@ -199,13 +199,13 @@ tcase!(tl_e_ll (LinkedList<u32> [Copying ZeroCopy]: ll![] => "00"));
 tcase!(tl_e_bts (BTreeSet<u32> [Copying ZeroCopy]: bts![] => "00"));
 tcase!(tl_e_hs (HashSet<u32> [Copying ZeroCopy]: hs![] => "00"));
 tcase!(tl_e_array ([u32;0] [Copying ZeroCopy]: [] => "00"));
-tcase!(sf_e_option (((),Option<u32>) [Copying ZeroCopy]: ((),None) => "01 00"));
-tcase!(sf_e_vec (((),Vec<u32>) [Copying ZeroCopy]: ((),vec![]) => "01 00"));
-tcase!(sf_e_vd (((),VecDeque<u32>) [Copying ZeroCopy]: ((),vd![]) => "01 00"));
-tcase!(sf_e_ll (((),LinkedList<u32>) [Copying ZeroCopy]: ((),ll![]) => "01 00"));
-tcase!(sf_e_bts (((),BTreeSet<u32>) [Copying ZeroCopy]: ((),bts![]) => "01 00"));
-tcase!(sf_e_hs (((),HashSet<u32>) [Copying ZeroCopy]: ((),hs![]) => "01 00"));
-tcase!(sf_e_array (((),[u32;0]) [Copying ZeroCopy]: ((),[]) => "01 00"));
+tcase!(sf_e_option (((),Option<u32>) [Copying ZeroCopy]: ((),None) => "41 00 00"));
+tcase!(sf_e_vec (((),Vec<u32>) [Copying ZeroCopy]: ((),vec![]) => "41 00 00"));
+tcase!(sf_e_vd (((),VecDeque<u32>) [Copying ZeroCopy]: ((),vd![]) => "41 00 00"));
+tcase!(sf_e_ll (((),LinkedList<u32>) [Copying ZeroCopy]: ((),ll![]) => "41 00 00"));
+tcase!(sf_e_bts (((),BTreeSet<u32>) [Copying ZeroCopy]: ((),bts![]) => "41 00 00"));
+tcase!(sf_e_hs (((),HashSet<u32>) [Copying ZeroCopy]: ((),hs![]) => "41 00 00"));
+tcase!(sf_e_array (((),[u32;0]) [Copying ZeroCopy]: ((),[]) => "41 00 00"));
 tcase!(ce_e_option (Vec<Option<u32>> [Copying ZeroCopy]: vec![None] =>
                     "C1 00 00"));
 tcase!(ce_e_vec (Vec<Vec<u32>> [Copying ZeroCopy]: vec![vec![]] =>
@@ -238,19 +238,19 @@ tcase!(tl_p_hs (HashSet<u32> [Copying ZeroCopy]: hs![5] =>
 tcase!(tl_p_array ([u32;2] [Copying ZeroCopy]: [5, 6] =>
                    "41 05 41 06 00"));
 tcase!(sf_p_option (((),Option<u32>) [Copying ZeroCopy]: ((),Some(5)) =>
-                    "01 42 05 00"));
+                    "41 00 42 05 00"));
 tcase!(sf_p_vec (((),Vec<u32>) [Copying ZeroCopy]: ((),vec![5, 6]) =>
-                 "01 42 05 42 06 00"));
+                 "41 00 42 05 42 06 00"));
 tcase!(sf_p_vd (((),VecDeque<u32>) [Copying ZeroCopy]: ((),vd![5, 6]) =>
-                "01 42 05 42 06 00"));
+                "41 00 42 05 42 06 00"));
 tcase!(sf_p_ll (((),LinkedList<u32>) [Copying ZeroCopy]: ((),ll![5, 6]) =>
-                "01 42 05 42 06 00"));
+                "41 00 42 05 42 06 00"));
 tcase!(sf_p_bts (((),BTreeSet<u32>) [Copying ZeroCopy]: ((),bts![5, 6]) =>
-                 "01 42 05 42 06 00"));
+                 "41 00 42 05 42 06 00"));
 tcase!(sf_p_hs (((),HashSet<u32>) [Copying ZeroCopy]: ((),hs![5]) =>
-                "01 42 05 00"));
+                "41 00 42 05 00"));
 tcase!(sf_p_array (((),[u32;2]) [Copying ZeroCopy]: ((),[5,6]) =>
-                   "01 42 05 42 06 00"));
+                   "41 00 42 05 42 06 00"));
 tcase!(ce_p_option (Vec<Option<u32>> [Copying ZeroCopy]:
                     vec![Some(5), Some(6)] => "C1 41 05 00 C1 41 06 00 00"));
 tcase!(ce_p_vec (Vec<Vec<u32>> [Copying ZeroCopy]:
@@ -275,8 +275,8 @@ tcase!(ce_p_array (Vec<[u32;2]> [Copying ZeroCopy]:
 // Empty maps
 tcase!(tl_e_btm (BTreeMap<u32,u32> [Copying ZeroCopy]: btm![] => "00"));
 tcase!(tl_e_hm (HashMap<u32,u32> [Copying ZeroCopy]: hm![] => "00"));
-tcase!(sf_e_btm (((),BTreeMap<u32,u32>) [Copying ZeroCopy]: ((),btm![]) => "01 00"));
-tcase!(sf_e_hm (((),HashMap<u32,u32>) [Copying ZeroCopy]: ((),hm![]) => "01 00"));
+tcase!(sf_e_btm (((),BTreeMap<u32,u32>) [Copying ZeroCopy]: ((),btm![]) => "41 00 00"));
+tcase!(sf_e_hm (((),HashMap<u32,u32>) [Copying ZeroCopy]: ((),hm![]) => "41 00 00"));
 tcase!(ce_e_btm (Vec<BTreeMap<u32,u32>> [Copying ZeroCopy]: vec![btm![]] =>
                  "C1 00 00"));
 tcase!(ce_e_hm (Vec<HashMap<u32,u32>> [Copying ZeroCopy]: vec![hm![]] =>
@@ -291,9 +291,9 @@ tcase!(tl_p_hm (HashMap<u32,u32> [Copying ZeroCopy]: hm![5 => 6] =>
                 "C1 41 05 42 06 00 00"));
 tcase!(sf_p_btm (((),BTreeMap<u32,u32>) [Copying ZeroCopy]:
                   ((),btm![5 => 6, 7 => 8]) =>
-                  "01 C2 41 05 42 06 00 C2 41 07 42 08 00 00"));
+                  "41 00 C2 41 05 42 06 00 C2 41 07 42 08 00 00"));
 tcase!(sf_p_hm (((),HashMap<u32,u32>) [Copying ZeroCopy]: ((),hm![5 => 6]) =>
-                 "01 C2 41 05 42 06 00 00"));
+                 "41 00 C2 41 05 42 06 00 00"));
 tcase!(ce_p_btm (Vec<BTreeMap<u32,u32>> [Copying ZeroCopy]:
                  vec![btm![1 => 2, 3 => 4], btm![5 => 6, 7 => 8]] =>
                  "C1 C1 41 01 42 02 00 C1 41 03 42 04 00 00 \
@@ -307,11 +307,11 @@ tcase!(tl_box (Box<u32> [Copying ZeroCopy]: Box::new(5) => "41 05 00"));
 tcase!(tl_rc (Rc<u32> [Copying ZeroCopy]: Rc::new(5) => "41 05 00"));
 tcase!(tl_arc (Arc<u32> [Copying ZeroCopy]: Arc::new(5) => "41 05 00"));
 tcase!(sf_box (((),Box<u32>) [Copying ZeroCopy]: ((),Box::new(5)) =>
-               "01 42 05 00"));
+               "41 00 42 05 00"));
 tcase!(sf_rc (((),Rc<u32>) [Copying ZeroCopy]: ((),Rc::new(5)) =>
-              "01 42 05 00"));
+              "41 00 42 05 00"));
 tcase!(sf_arc (((),Arc<u32>) [Copying ZeroCopy]: ((),Arc::new(5)) =>
-               "01 42 05 00"));
+               "41 00 42 05 00"));
 tcase!(ce_box (Vec<Box<u32>> [Copying ZeroCopy]: vec![Box::new(5)] =>
                "41 05 00"));
 tcase!(ce_rc (Vec<Rc<u32>> [Copying ZeroCopy]: vec![Rc::new(5)] =>

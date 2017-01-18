@@ -39,13 +39,9 @@ Non-features:
 
 ## Physical Format
 
-The physical format is based around exactly four types: null, integers, blobs,
-and structs. The top-level of the format is always a struct or a flat stream of
-structs.
-
-### null
-
-The null type occupies no space.
+The physical format is based around exactly four types: integers, blobs,
+structs, and enums. The top-level of the format is always a struct or a flat
+stream of structs.
 
 ### integers
 
@@ -68,7 +64,7 @@ A struct is composed of an alternating sequence of descriptors and values,
 optionally terminated with a terminating descriptor.
 
 A descriptor is simply a one-byte value. The upper two bits indicate the type
-(0 = null, 1 = integer, 2 = blob, 3 = struct) and the lower 6 indicate the tag.
+(0 = enum, 1 = integer, 2 = blob, 3 = struct) and the lower 6 indicate the tag.
 Except in special descriptors, the type indicates how the value following
 the descriptor is interpreted.
 
@@ -97,6 +93,11 @@ writing a stream.
 3 - Padding. The byte is ignored. This could also be used as a heartbeat value
 in realtime streaming protocols.
 
+### enum
+
+An enum is followed by an integer indicating the discriminant and then proceeds
+the same way as a struct body.
+
 ## Logical Formats
 
 Integers are represented directly as integers. `bool` is the integer 0 if false
@@ -114,15 +115,14 @@ be.
 Anonymous tuples are treated as structs, where the first element is field 1,
 the next is 2, and so on.
 
-The type `()` is represented as null, as well as other unit-like structs.
+The type `()`, as well as other unit types, is represented as integer 0.
 
 User-defined structs of all kinds are represented as structs, with field tags
 specified by the user. Newtype structs can of course directly delegate to
 whatever they contain.
 
-User-defined general enums are represented as a struct where each enum variant
-is a different field, tags selected by the user. The content of the enum is
-treated the same way as user-defined structs. C-like enums can also be
-serialised as integers.
+User-defined general enums are represented as an enum with a discriminant
+selected by the user, and a struct body corresponding to the contents of the
+variant. C-like enums can also be serialised as integers.
 
 There is currently no pre-defined way to serialise floating-point values.

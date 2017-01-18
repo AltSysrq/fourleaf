@@ -191,8 +191,6 @@ pub struct Field<'d, R : 'd> {
 /// A value of a decoded field.
 #[derive(Debug)]
 pub enum Value<'d, R : 'd> {
-    /// The null value.
-    Null,
     /// General integer values. Conversion to things other than u64 can be
     /// achieved with the `to_<type>` methods.
     Integer(u64),
@@ -212,6 +210,9 @@ pub enum Value<'d, R : 'd> {
     /// This contains a reference back to the `Stream` that read the tag to
     /// simplify recursive deserialisers.
     Struct(&'d mut Stream<R>),
+    /// An enumeration with the given discriminant. The struct body of the enum
+    /// is accessible via the embedded `Stream` the same way as for `Struct`.
+    Enum(u64, &'d mut Stream<R>),
 }
 
 /// A handle to a blob within the fourleaf stream.
@@ -632,11 +633,14 @@ impl<R> Stream<R> {
                   -> Result<Value<R>>
     where R : Read {
         Ok(match ty {
-            DescriptorType::Null => Value::Null,
             DescriptorType::Integer => Value::Integer(
                 wire::decode_u64(&mut self.track(false))?),
             DescriptorType::Blob => Value::Blob(self.next_blob()?),
             DescriptorType::Struct => Value::Struct(self),
+            DescriptorType::Enum => {
+                let discriminant = wire::decode_u64(&mut self.track(false))?;
+                Value::Enum(discriminant, self)
+            },
         })
     }
 
@@ -669,15 +673,14 @@ impl<R> Stream<R> {
         Ok(())
     }
 
-    /// Writes a field with the null value to the output.
+    /// Writes a field with the null/unit value to the output, i.e., a zero.
     ///
     /// ## Panics
     ///
     /// Panics if `tag` is not a valid field tag.
     pub fn write_null(&mut self, tag: u8) -> Result<()>
     where R : Write {
-        self.write_desc(wire::ParsedDescriptor::Pair(
-            wire::DescriptorType::Null, tag))
+        self.write_u64(tag, 0)
     }
 
     /// Writes a field with the given integer value to the output.
@@ -851,7 +854,7 @@ impl<R> Stream<R> {
     /// Writes a struct field to the output.
     ///
     /// The body of the struct can be constructed by continuing to make calls
-    /// to the `write_*` methods of this `Stream`, and terminated with the
+    /// to the `write_*` methods of this `Stream`, and terminating with the
     /// `write_end_struct` method.
     ///
     /// ## Panics
@@ -861,6 +864,23 @@ impl<R> Stream<R> {
     where R : Write {
         self.write_desc(wire::ParsedDescriptor::Pair(
             wire::DescriptorType::Struct, tag))
+    }
+
+    /// Writes an enum field to the output.
+    ///
+    /// The body of the enum can be constructed by continuing to make calls to
+    /// the `write_*` methods of this `Stream`, and terminating with the
+    /// `write_end_struct` method.
+    ///
+    /// ## Panics
+    ///
+    /// Panics if `tag` is not a valid field tag.
+    pub fn write_enum(&mut self, tag: u8, discriminant: u64) -> Result<()>
+    where R : Write {
+        self.write_desc(wire::ParsedDescriptor::Pair(
+            wire::DescriptorType::Enum, tag))?;
+        wire::encode_u64(&mut self.track(false), discriminant)?;
+        Ok(())
     }
 
     /// Writes an end-of-struct element to the output.
@@ -976,9 +996,10 @@ impl<R> Stream<R> {
     pub fn write_field<I>(&mut self, f: &mut Field<I>) -> Result<()>
     where R : Write, I : Read {
         match f.value {
-            Value::Null => self.write_null(f.tag),
             Value::Integer(i) => self.write_u64(f.tag, i),
             Value::Struct(..) => self.write_struct(f.tag),
+            Value::Enum(discriminant, ..) =>
+                self.write_enum(f.tag, discriminant),
             Value::Blob(ref mut src) => {
                 let mut dst = self.write_blob_alloc(f.tag, src.len())?;
                 io::copy(src, &mut dst)?;
@@ -1272,12 +1293,12 @@ macro_rules! to_int {
             use wire::unzigzag;
 
             match *self {
-                Value::Null =>
-                    Err(Error::UnexpectedType("Integer", "Null")),
                 Value::Blob(..) =>
                     Err(Error::UnexpectedType("Integer", "Blob")),
                 Value::Struct(..) =>
                     Err(Error::UnexpectedType("Integer", "Struct")),
+                Value::Enum(..) =>
+                    Err(Error::UnexpectedType("Integer", "Enum")),
                 Value::Integer(v) => {
                     let v = $zz(v);
                     if v < ($t::MIN as $long) {
@@ -1300,30 +1321,48 @@ macro_rules! to_int {
 fn id<T>(t: T) -> T { t }
 
 impl<'d, R : 'd> Value<'d, R> {
-    /// If this value is Null, return `()`. Otherwise, return an error message.
+    /// If this value is null/unit (i.e., integer zero), return `()`.
+    /// Otherwise, return an error.
     pub fn to_null(&self) -> Result<()> {
         match *self {
-            Value::Null => Ok(()),
-            Value::Integer(..) =>
-                Err(Error::UnexpectedType("Null", "Integer")),
+            Value::Integer(n) =>
+                if 0 == n { Ok(()) } else {
+                    Err(Error::IntegerOutOfRange(
+                        "null/unit value is non-zero")) },
             Value::Blob(..) =>
-                Err(Error::UnexpectedType("Null", "Blob")),
+                Err(Error::UnexpectedType("Integer", "Blob")),
             Value::Struct(..) =>
-                Err(Error::UnexpectedType("Null", "Struct")),
+                Err(Error::UnexpectedType("Integer", "Struct")),
+            Value::Enum(..) =>
+                Err(Error::UnexpectedType("Integer", "Enum")),
         }
     }
 
     /// If this value is a Struct, return the source stream. Otherwise, return
-    /// an error message.
+    /// an error.
     pub fn to_struct(&mut self) -> Result<&mut Stream<R>> {
         match *self {
             Value::Struct(ref mut s) => Ok(s),
-            Value::Null =>
-                Err(Error::UnexpectedType("Struct", "Null")),
             Value::Integer(..) =>
                 Err(Error::UnexpectedType("Struct", "Integer")),
             Value::Blob(..) =>
                 Err(Error::UnexpectedType("Struct", "Blob")),
+            Value::Enum(..) =>
+                Err(Error::UnexpectedType("Struct", "Enum")),
+        }
+    }
+
+    /// If this value is an Enum, return its discriminant and the source
+    /// stream. Otherwise, return an error.
+    pub fn to_enum(&mut self) -> Result<(u64, &mut Stream<R>)> {
+        match *self {
+            Value::Enum(discriminant, ref mut s) => Ok((discriminant, s)),
+            Value::Integer(..) =>
+                Err(Error::UnexpectedType("Enum", "Integer")),
+            Value::Blob(..) =>
+                Err(Error::UnexpectedType("Enum", "Blob")),
+            Value::Struct(..) =>
+                Err(Error::UnexpectedType("Enum", "Struct")),
         }
     }
 
@@ -1357,12 +1396,12 @@ impl<'d, R : 'd> Value<'d, R> {
     pub fn to_blob(&mut self) -> Result<&mut Blob<'d, R>> {
         match *self {
             Value::Blob(ref mut b) => Ok(b),
-            Value::Null =>
-                Err(Error::UnexpectedType("Blob", "Null")),
             Value::Integer(..) =>
                 Err(Error::UnexpectedType("Blob", "Integer")),
             Value::Struct(..) =>
                 Err(Error::UnexpectedType("Blob", "Struct")),
+            Value::Enum(..) =>
+                Err(Error::UnexpectedType("Blob", "Enum")),
         }
     }
 }
@@ -1381,7 +1420,7 @@ mod test {
 
     #[test]
     fn simple() {
-        let mut dec = stream("01 00");
+        let mut dec = stream("41 00 00");
         {
             let field = dec.next_field().unwrap().unwrap();
             assert_eq!(1, field.tag);
@@ -1470,7 +1509,7 @@ mod test {
 
     #[test]
     fn read_partial_blob() {
-        let mut dec = stream("81 0B 'hello world' 02 00");
+        let mut dec = stream("81 0B 'hello world' 42 00 00");
 
         {
             let mut field = dec.next_field().unwrap().unwrap();
@@ -1550,8 +1589,22 @@ mod test {
     }
 
     #[test]
+    fn read_enum() {
+        let mut dec = stream("02 81 01 00");
+
+        {
+            let mut field = dec.next_field().unwrap().unwrap();
+            assert_eq!(2, field.tag);
+            assert_eq!(0, field.pos);
+            assert_eq!(129, field.value.to_enum().unwrap().0);
+        }
+
+        assert!(dec.next_field().unwrap().is_none());
+    }
+
+    #[test]
     fn read_explicit_eof() {
-        let mut dec = stream("C1 40 02");
+        let mut dec = stream("C1 40 42 00");
 
         {
             let mut field = dec.next_field().unwrap().unwrap();
@@ -1574,7 +1627,7 @@ mod test {
 
     #[test]
     fn graceless_eof() {
-        let mut dec = stream("01");
+        let mut dec = stream("41 00");
         assert!(!dec.graceful_eof());
         {
             let field = dec.next_field().unwrap().unwrap();
@@ -1591,7 +1644,7 @@ mod test {
 
     #[test]
     fn graceful_eof() {
-        let mut dec = stream("01");
+        let mut dec = stream("41 00");
         dec.set_graceful_eof(true);
         assert!(dec.graceful_eof());
         {
@@ -1601,12 +1654,12 @@ mod test {
 
         assert!(dec.next_field().unwrap().is_none());
         assert!(dec.eof());
-        assert_eq!(1, dec.pos());
+        assert_eq!(2, dec.pos());
     }
 
     #[test]
     fn padding_skipped() {
-        let mut dec = stream("01 C0 C0 C0 02");
+        let mut dec = stream("41 00 C0 C0 C0 42 00");
         {
             let field = dec.next_field().unwrap().unwrap();
             assert_eq!(1, field.tag);
@@ -1616,14 +1669,14 @@ mod test {
         {
             let field = dec.next_field().unwrap().unwrap();
             assert_eq!(2, field.tag);
-            assert_eq!(4, field.pos);
+            assert_eq!(5, field.pos);
             field.value.to_null().unwrap();
         }
     }
 
     #[test]
     fn read_inband_error() {
-        let mut dec = stream("80 05 'plugh' 01");
+        let mut dec = stream("80 05 'plugh' 41 00");
 
         match dec.next_field() {
             Ok(f) => panic!("next_field succeeded unexpectedly: {:?}", f),
@@ -1657,7 +1710,7 @@ mod test {
 
     #[test]
     fn reset_pos_skips_unconsumed_blob() {
-        let mut dec = stream("81 05 'plugh' 02 00");
+        let mut dec = stream("81 05 'plugh' 42 00 00");
         {
             let mut field = dec.next_field().unwrap().unwrap();
             assert_eq!(1, field.tag);
@@ -1675,7 +1728,7 @@ mod test {
 
     #[test]
     fn blob_seek() {
-        let mut dec = stream("81 0B 'hello world' 02");
+        let mut dec = stream("81 0B 'hello world' 42 00");
         {
             let mut field = dec.next_field().unwrap().unwrap();
             assert_eq!(1, field.tag);
@@ -1745,7 +1798,7 @@ mod test {
 
     #[test]
     fn blob_rewrite() {
-        let mut dec = stream("81 0B 'hello world' 02");
+        let mut dec = stream("81 0B 'hello world' 42 00");
         {
             let mut field = dec.next_field().unwrap().unwrap();
             assert_eq!(1, field.tag);
@@ -1768,7 +1821,7 @@ mod test {
 
     #[test]
     fn blob_slicing() {
-        let mut data = parse("81 0B 'hello world' 02");
+        let mut data = parse("81 0B 'hello world' 42 00");
         {
             let mut dec = Stream::from_slice(&mut data[..]);
 
@@ -1794,7 +1847,7 @@ mod test {
             }
         }
 
-        let data2 = parse("81 0B 'hello World' 02");
+        let data2 = parse("81 0B 'hello World' 42 00");
         assert_eq!(data, data2);
     }
 
@@ -1814,7 +1867,7 @@ mod test {
 
     #[test]
     fn blob_bufread() {
-        let mut dec = stream("81 0B 'hello world' 02");
+        let mut dec = stream("81 0B 'hello world' 42 00");
         {
             let mut field = dec.next_field().unwrap().unwrap();
             assert_eq!(1, field.tag);
@@ -1867,19 +1920,22 @@ mod test {
     fn write_scalars() {
         let mut enc = Stream::new(Vec::<u8>::new());
         enc.write_null(1).unwrap();
-        assert_eq!(1, enc.pos());
+        assert_eq!(2, enc.pos());
         enc.write_u64(2, 42).unwrap();
-        assert_eq!(3, enc.pos());
-        enc.write_struct(3).unwrap();
         assert_eq!(4, enc.pos());
-        enc.write_end_struct().unwrap();
+        enc.write_struct(3).unwrap();
         assert_eq!(5, enc.pos());
-        enc.write_end_doc().unwrap();
+        enc.write_end_struct().unwrap();
         assert_eq!(6, enc.pos());
+        enc.write_end_doc().unwrap();
+        assert_eq!(7, enc.pos());
         enc.write_padding().unwrap();
+        assert_eq!(8, enc.pos());
+        enc.write_enum(4, 42u64).unwrap();
+        assert_eq!(10, enc.pos());
 
         let data = enc.into_inner();
-        let expected = parse("01 42 2A C3 00 40 C0");
+        let expected = parse("41 00 42 2A C3 00 40 C0 04 2A");
         assert_eq!(expected, data);
     }
 
@@ -2003,15 +2059,15 @@ mod test {
     fn write_padding_to_alignment() {
         let mut enc = Stream::new(Vec::new());
         enc.pad_to_align(4).unwrap();
-        enc.write_null(1).unwrap();
+        enc.write_struct(1).unwrap();
         enc.pad_to_align(4).unwrap();
-        enc.write_null(1).unwrap();
+        enc.write_struct(1).unwrap();
         enc.pad_to_align(2).unwrap();
-        enc.write_null(1).unwrap();
+        enc.write_struct(1).unwrap();
         enc.pad_to_align(8).unwrap();
 
         let data = enc.into_inner();
-        let expected = parse("01 C0 C0 C0 01 C0 01 C0");
+        let expected = parse("C1 C0 C0 C0 C1 C0 C1 C0");
         assert_eq!(expected, data);
     }
 }
