@@ -313,17 +313,17 @@ macro_rules! des_struct_body {
             let mut $field =
                 <<$t as Deserialize<R, STYLE>>::Accum as Default>::default();
         )*
-         while let Some(mut field) = $stream.next_field().context($context)? {
-            match field.tag {
+         while let Some(mut _field) = $stream.next_field().context($context)? {
+            match _field.tag {
                 $(
                     $tag => {
                         let subcontext = $context.push(
-                            stringify!($field), field.pos)?;
+                            stringify!($field), _field.pos)?;
                         <$t as Deserialize<R, STYLE>>::deserialize_field(
-                            &mut $field, &subcontext, &mut field)?;
+                            &mut $field, &subcontext, &mut _field)?;
                     },
                 )*
-                _ => $context.unknown_field(&field)?,
+                _ => $context.unknown_field(&_field)?,
             }
         }
 
@@ -690,11 +690,6 @@ $($stuff)* {
     }
 }
 } }
-
-des_unary! {
-    (impl<R : Read, STYLE> Deserialize<R, STYLE> for ());
-    |context, field| (field.value.to_null().context(context)?)
-}
 
 des_unary! {
     (impl<T : ?Sized, R : Read, STYLE> Deserialize<R, STYLE>
@@ -1160,14 +1155,16 @@ macro_rules! des_struct {
                      context.to_string(), 1));
              }
 
-             *accum = Some(Self::deserialize_element(context, field)?);
+             *accum = Some(
+                 <Self as Deserialize<R, STYLE>>
+                     ::deserialize_element(context, field)?);
              Ok(())
          }
 
          fn deserialize_element(context: &Context,
                                 field: &mut stream::Field<R>)
                                 -> Result<Self> {
-             Self::deserialize_top_level(
+             <Self as Deserialize<R, STYLE>>::deserialize_top_level(
                  context, field.value.to_struct().context(context)?)
          }
 
@@ -1188,6 +1185,7 @@ macro_rules! des_tuple {
     } }
 }
 
+des_tuple!();
 des_tuple!(1: field_0: F0);
 des_tuple!(1: field_0: F0, 2: field_1: F1);
 des_tuple!(1: field_0: F0, 2: field_1: F1, 3: field_2: F2);

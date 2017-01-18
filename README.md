@@ -115,7 +115,10 @@ be.
 Anonymous tuples are treated as structs, where the first element is field 1,
 the next is 2, and so on.
 
-The type `()`, as well as other unit types, is represented as integer 0.
+Unit types are serialised depending on whether they are "struct-like". `()` is
+considered the empty tuple and serialised as an empty struct. On the other
+hand, things like `PhantomData` are inherently units and serialised as integer
+0.
 
 User-defined structs of all kinds are represented as structs, with field tags
 specified by the user. Newtype structs can of course directly delegate to

@@ -128,7 +128,8 @@ impl<T : SerializeAs + ?Sized> Serialize for T {
 impl Serialize for () {
     fn serialize_element<R : Write>(&self, dst: &mut Stream<R>, tag: u8)
                                     -> Result<()> {
-        dst.write_null(tag)
+        dst.write_struct(tag)?;
+        dst.write_end_struct()
     }
 }
 
