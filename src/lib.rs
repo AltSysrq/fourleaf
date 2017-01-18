@@ -19,6 +19,13 @@ pub mod wire;
 pub mod stream;
 pub mod ser;
 pub mod de;
+#[allow(missing_docs)] #[doc(hidden)]
+#[macro_use] pub mod sugar;
+
+#[allow(missing_docs)]
+#[doc(hidden)] pub mod ms {
+    pub use quick_error::ResultExt;
+}
 
 #[cfg(test)] mod ser_des_builtin_tests;
 #[cfg(test)] mod test_helpers;

@@ -179,7 +179,8 @@ quick_error! {
     }
 }
 
-type Result<T> = ::std::result::Result<T, Error>;
+/// The general result type returned by deserialising functions.
+pub type Result<T> = ::std::result::Result<T, Error>;
 
 /// Run-time configuration for deserialisation.
 #[derive(Debug, Clone)]
@@ -323,6 +324,7 @@ macro_rules! des_struct_body {
                             &mut $field, &subcontext, &mut _field)?;
                     },
                 )*
+                    // TODO We need to skip structs/enums here
                 _ => $context.unknown_field(&_field)?,
             }
         }
