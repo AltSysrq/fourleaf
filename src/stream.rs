@@ -147,6 +147,11 @@ pub struct Stream<R> {
     /// If there is an uncommitted dynamic blob, the byte offset where it
     /// starts.
     dynamic_blob_start: u64,
+    /// The current struct nesting depth. 0 = true top-level. Incremented by
+    /// `Struct` and `Enum` elements; decremented by `EndOfStruct`, set to 0 by
+    /// `EndOfDoc`. Additionally, the a pair read when this is equal to 0
+    /// increments it (since the start of the top-level struct is implicit).
+    struct_depth: u64,
     /// Whether an EOF from the underlying input should be translated to an
     /// `EndOfDoc` descriptor.
     graceful_eof: bool,
@@ -184,6 +189,14 @@ pub struct Field<'d, R : 'd> {
     /// The offset of this field in the stream. This specifically points to the
     /// byte containing the tag.
     pub pos: u64,
+    /// The struct nesting depth of this field in the stream. Always at least
+    /// 1. See also `Stream::struct_depth()`.
+    ///
+    /// Note that even for `Struct`s and `Enum`s, this is the depth of the
+    /// field itself, and not its contents, whereas immediately after reading
+    /// such a field the value of `Stream::struct_depth()` will reflect the
+    /// depth of the contents.
+    pub depth: u64,
     /// The value of this field.
     pub value: Value<'d, R>,
 }
@@ -321,6 +334,7 @@ impl<R> Stream<R> {
             eof: false,
             blob_end: 0,
             dynamic_blob_start: 0,
+            struct_depth: 0,
             graceful_eof: false,
             seek: None,
             commit: None,
@@ -340,6 +354,7 @@ impl<R> Stream<R> {
             eof: false,
             blob_end: 0,
             dynamic_blob_start: 0,
+            struct_depth: 0,
             graceful_eof: false,
             seek: Some(Nd(<R as Seek>::seek)),
             commit: None,
@@ -473,6 +488,10 @@ impl<R> Stream<R> {
     /// sensible; i.e., that the byte location points to a descriptor in the
     /// underlying byte stream.
     ///
+    /// This resets the struct depth counter to 0. If this is not correct, it
+    /// is the callers responsibility to call `set_struct_depth` to the correct
+    /// value if features depending on struct depth tracking are being used.
+    ///
     /// The `Stream`'s own `pos` is set to match what the underlying byte
     /// stream returns. If the client code is using a logical `pos` which
     /// differs from the underlying stream position, the caller will need to
@@ -482,6 +501,7 @@ impl<R> Stream<R> {
         self.commit()?;
         let off = self.inner.seek(whence)?;
         self.reset_pos(off)?;
+        self.struct_depth = 0;
         Ok(off)
     }
 
@@ -523,6 +543,39 @@ impl<R> Stream<R> {
         self.graceful_eof = graceful_eof;
     }
 
+    /// Returns the current struct nesting depth of this stream.
+    ///
+    /// This specifically counts the number of `EndOfStruct` elements required
+    /// to return to top-level. If the input causes the counter to overflow, it
+    /// simply saturates at 0.
+    ///
+    /// Initially, the struct depth is set to 0. Upon reading a field of any
+    /// kind, it becomes 1. `Struct` and `Enum` fields further increment this
+    /// value, and corresponding `EndOfStruct` elements decrement it.
+    /// `EndOfDoc` elements immediately set it to 0.
+    ///
+    /// `Stream` does not guarantee any particular behaviour if this counter
+    /// overflows. Note that this is normally impossible, since such an input
+    /// would also need to be greater than the maximum input length `Stream`
+    /// can handle.
+    ///
+    /// The struct depth is only tracked for read operations, since it is
+    /// intended for recovering from errors or skipping unknown items. For this
+    /// reason the `Read` constraint is present, even though this call itself
+    /// does not do any IO.
+    pub fn struct_depth(&self) -> u64 where R : Read {
+        self.struct_depth
+    }
+
+    /// Resets the struct depth counter.
+    ///
+    /// Generally, the only reason to call this is if the caller caused the
+    /// position of the underlying stream to change and wishes to correct the
+    /// counter, or in other extraordinary circumstances.
+    pub fn set_struct_depth(&mut self, depth: u64) {
+        self.struct_depth = depth;
+    }
+
     fn track<'d>(&'d mut self, graceful_eof: bool) -> StreamTracker<'d, R> {
         let graceful_eof = graceful_eof && self.graceful_eof;
         StreamTracker(self, graceful_eof)
@@ -530,6 +583,21 @@ impl<R> Stream<R> {
 
     fn check_advance_pos(&self, n: u64) -> io::Result<()> {
         check_advance_pos(self.pos, n)
+    }
+
+    /// Decodes and discards input elements until the struct nesting depth is
+    /// less than or equal to the given depth or an error occurs.
+    ///
+    /// This can be used to easily skip unknown fields, or to handle
+    /// recoverable errors by moving to the next top-level item.
+    ///
+    /// See `struct_depth` for details on how struct depth is tracked.
+    pub fn skip_up(&mut self, depth: u64) -> Result<()>
+    where R : Read {
+        while self.struct_depth > depth {
+            self.next_element()?;
+        }
+        Ok(())
     }
 
     /// Decodes the next field.
@@ -600,18 +668,28 @@ impl<R> Stream<R> {
         loop {
             let offset = self.pos;
             match wire::decode_descriptor(&mut self.track(true))?.parse() {
-                ParsedDescriptor::Pair(ty, tag) =>
+                ParsedDescriptor::Pair(ty, tag) => {
+                    if 0 == self.struct_depth {
+                        self.struct_depth = 1;
+                    }
                     return Ok(Element::Field(Field {
                         tag: tag,
                         pos: offset,
+                        depth: self.struct_depth,
                         value: self.next_value(ty)?,
-                    })),
+                    }))
+                },
 
-                ParsedDescriptor::Special(SpecialType::EndOfStruct) =>
-                    return Ok(Element::EndOfStruct),
+                ParsedDescriptor::Special(SpecialType::EndOfStruct) => {
+                    if self.struct_depth > 0 {
+                        self.struct_depth -= 1;
+                    }
+                    return Ok(Element::EndOfStruct);
+                },
 
                 ParsedDescriptor::Special(SpecialType::EndOfDoc) => {
                     self.eof = true;
+                    self.struct_depth = 0;
                     return Ok(Element::EndOfDoc);
                 },
 
@@ -636,9 +714,13 @@ impl<R> Stream<R> {
             DescriptorType::Integer => Value::Integer(
                 wire::decode_u64(&mut self.track(false))?),
             DescriptorType::Blob => Value::Blob(self.next_blob()?),
-            DescriptorType::Struct => Value::Struct(self),
+            DescriptorType::Struct => {
+                self.struct_depth += 1;
+                Value::Struct(self)
+            },
             DescriptorType::Enum => {
                 let discriminant = wire::decode_u64(&mut self.track(false))?;
+                self.struct_depth += 1;
                 Value::Enum(discriminant, self)
             },
         })
@@ -1320,6 +1402,21 @@ macro_rules! to_int {
 
 fn id<T>(t: T) -> T { t }
 
+impl<'d, R : 'd> Field<'d, R> {
+    /// Causes this field and all its children to be skipped.
+    ///
+    /// The actual IO of skipping this field does not necessarily happen within
+    /// this call, and may be deferred to the next call to `next_field` or
+    /// anything else that results in committing the `Stream`.
+    pub fn skip(self) -> Result<()> where R : Read {
+        match self.value {
+            Value::Enum(_, dec) | Value::Struct(dec) =>
+                dec.skip_up(self.depth),
+            Value::Integer(..) | Value::Blob(..) => Ok(()),
+        }
+    }
+}
+
 impl<'d, R : 'd> Value<'d, R> {
     /// If this value is null/unit (i.e., integer zero), return `()`.
     /// Otherwise, return an error.
@@ -1914,6 +2011,104 @@ mod test {
 
         assert_eq!(b"hello world", hw);
         assert_eq!(b"plugh", plugh);
+    }
+
+    #[test]
+    fn struct_depth_tracking() {
+        let mut dec = stream("41 01 01 2A C1 41 02 00 00 00 \
+                              C1 C1 C1 40");
+        assert_eq!(0, dec.struct_depth());
+        {
+            let field = dec.next_field().unwrap().unwrap();
+            assert_eq!(1, field.value.to_u64().unwrap());
+            assert_eq!(1, field.depth);
+        }
+        assert_eq!(1, dec.struct_depth());
+        {
+            let mut field = dec.next_field().unwrap().unwrap();
+            field.value.to_enum().unwrap();
+            assert_eq!(1, field.depth);
+        }
+        assert_eq!(2, dec.struct_depth());
+        {
+            let mut field = dec.next_field().unwrap().unwrap();
+            field.value.to_struct().unwrap();
+            assert_eq!(2, field.depth);
+        }
+        assert_eq!(3, dec.struct_depth());
+        {
+            let field = dec.next_field().unwrap().unwrap();
+            assert_eq!(2, field.value.to_u64().unwrap());
+            assert_eq!(3, field.depth);
+        }
+        assert!(dec.next_field().unwrap().is_none());
+        assert_eq!(2, dec.struct_depth());
+        assert!(dec.next_field().unwrap().is_none());
+        assert_eq!(1, dec.struct_depth());
+        assert!(dec.next_field().unwrap().is_none());
+        assert_eq!(0, dec.struct_depth());
+
+        {
+            let mut field = dec.next_field().unwrap().unwrap();
+            field.value.to_struct().unwrap();
+            assert_eq!(1, field.depth);
+        }
+        assert_eq!(2, dec.struct_depth());
+        {
+            let mut field = dec.next_field().unwrap().unwrap();
+            field.value.to_struct().unwrap();
+            assert_eq!(2, field.depth);
+        }
+        assert_eq!(3, dec.struct_depth());
+        {
+            let mut field = dec.next_field().unwrap().unwrap();
+            field.value.to_struct().unwrap();
+            assert_eq!(3, field.depth);
+        }
+        assert_eq!(4, dec.struct_depth());
+        assert!(dec.next_field().unwrap().is_none());
+        assert_eq!(0, dec.struct_depth());
+    }
+
+    #[test]
+    fn struct_depth_tracking_handles_underflow() {
+        let mut dec = stream("00 00");
+        assert!(dec.next_field().unwrap().is_none());
+        assert_eq!(0, dec.struct_depth());
+        assert!(dec.next_field().unwrap().is_none());
+        assert_eq!(0, dec.struct_depth());
+    }
+
+    #[test]
+    fn skip_up_to_container() {
+        let mut dec = stream("C1 C2 C3 41 01 00 00 00 42 02 00");
+        {
+            let mut field = dec.next_field().unwrap().unwrap();
+            assert_eq!(1, field.tag);
+            field.value.to_struct().unwrap();
+            field.skip().unwrap();
+        }
+        {
+            let field = dec.next_field().unwrap().unwrap();
+            assert_eq!(2, field.tag);
+            assert_eq!(2, field.value.to_u64().unwrap());
+        }
+    }
+
+    #[test]
+    fn skip_up_to_top() {
+        let mut dec = stream("C1 C2 C3 41 01 00 00 00 42 02 00 43 03 00");
+        {
+            let mut field = dec.next_field().unwrap().unwrap();
+            assert_eq!(1, field.tag);
+            field.value.to_struct().unwrap();
+        }
+        dec.skip_up(0).unwrap();
+        {
+            let field = dec.next_field().unwrap().unwrap();
+            assert_eq!(3, field.tag);
+            assert_eq!(3, field.value.to_u64().unwrap());
+        }
     }
 
     #[test]

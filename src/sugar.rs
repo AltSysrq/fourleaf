@@ -68,8 +68,10 @@ macro_rules! fourleaf_retrofit {
                         deserialize_field(&mut $field_name, &subcontext,
                                           &mut _field)?;
                     })*
-                        // TODO Skip structs/enums
-                    _ => context.unknown_field(&_field)?,
+                    _ => {
+                        context.unknown_field(&_field)?;
+                        $crate::ms::ResultExt::context(_field.skip(), context)?
+                    },
                 } }
 
                 $(

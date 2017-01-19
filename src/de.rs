@@ -324,8 +324,10 @@ macro_rules! des_struct_body {
                             &mut $field, &subcontext, &mut _field)?;
                     },
                 )*
-                    // TODO We need to skip structs/enums here
-                _ => $context.unknown_field(&_field)?,
+                _ => {
+                    $context.unknown_field(&_field)?;
+                    _field.skip().context($context)?
+                },
             }
         }
 

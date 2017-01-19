@@ -367,9 +367,9 @@ fn cow_desers_according_to_style() {
 
 #[test]
 fn unknown_fields_ignored_by_default() {
-    let data = parse("41 01 42 02 00");
-    let res = from_slice_copy::<(u32,)>(&data, &Config::default()).unwrap();
-    assert_eq!((1,), res);
+    let data = parse("41 01 C3 41 2A 00 42 02 00");
+    let res = from_slice_copy::<(u32,u32)>(&data, &Config::default()).unwrap();
+    assert_eq!((1,2), res);
 }
 
 macro_rules! ecase {
