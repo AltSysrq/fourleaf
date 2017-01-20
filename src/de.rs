@@ -135,6 +135,12 @@ quick_error! {
             description("unknown field encountered")
             display("unknown field {} encountered at {}.{{{}}}", tag, wo, pos)
         }
+        /// An unknown enum variant was encountered and the enum does not have
+        /// any way to handle unknown variants.
+        UnknownVariant(wo: String, variant: u64) {
+            description("unknown enum variant encountered")
+            display("unknown enum variant {} encountered at {}", variant, wo)
+        }
         /// A field was encountered fewer times than is permitted. This error
         /// is flagged at the end of the struct containing the field.
         FieldOccursTooFewTimes(wo: String, min: u64) {

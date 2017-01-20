@@ -58,6 +58,32 @@ macro_rules! fourleaf_retrofit {
         $constructor
     } };
 
+    (@_DESER_BOILERPLATE) => {
+        type Accum = Option<Self>;
+
+        fn deserialize_field(accum: &mut Option<Self>,
+                             context: &$crate::de::Context,
+                             field: &mut $crate::stream::Field<R>)
+                             -> $crate::de::Result<()> {
+            if accum.is_some() {
+                return Err($crate::de::Error::FieldOccursTooFewTimes(
+                    context.to_string(), 1));
+            }
+
+            *accum = Some(
+                <Self as $crate::de::Deserialize<R, STYLE>>::
+                deserialize_element(context, field)?);
+            Ok(())
+        }
+
+
+        fn finish(accum: Option<Self>, context: &$crate::de::Context)
+                  -> $crate::de::Result<Self> {
+            accum.ok_or_else(|| $crate::de::Error::RequiredFieldMissing(
+                context.to_string()))
+        }
+    };
+
     ($form:tt $self_ty:ty : {} $impl_deser:tt $body:tt) => {
         fourleaf_retrofit!($form $self_ty : {
             impl $crate::ser::Serialize for $self_ty
@@ -94,7 +120,7 @@ macro_rules! fourleaf_retrofit {
         }
 
         $($impl_deser)* {
-            type Accum = Option<Self>;
+            fourleaf_retrofit!(@_DESER_BOILERPLATE);
 
             fn deserialize_top_level($context: &$crate::de::Context,
                                      stream: &mut $crate::stream::Stream<R>)
@@ -105,21 +131,6 @@ macro_rules! fourleaf_retrofit {
                 })
             }
 
-            fn deserialize_field(accum: &mut Option<Self>,
-                                 context: &$crate::de::Context,
-                                 field: &mut $crate::stream::Field<R>)
-                                 -> $crate::de::Result<()> {
-                if accum.is_some() {
-                    return Err($crate::de::Error::FieldOccursTooFewTimes(
-                        context.to_string(), 1));
-                }
-
-                *accum = Some(
-                    <Self as $crate::de::Deserialize<R, STYLE>>::
-                    deserialize_element(context, field)?);
-                Ok(())
-            }
-
             fn deserialize_element(context: &$crate::de::Context,
                                    field: &mut $crate::stream::Field<R>)
                                    -> $crate::de::Result<Self> {
@@ -127,14 +138,55 @@ macro_rules! fourleaf_retrofit {
                 deserialize_top_level(context, $crate::ms::ResultExt::context(
                     field.value.to_struct(), context)?)
             }
+        }
+    };
 
-            fn finish(accum: Option<Self>, context: &$crate::de::Context)
-                      -> $crate::de::Result<Self> {
-                accum.ok_or_else(|| $crate::de::Error::RequiredFieldMissing(
-                    context.to_string()))
+    (enum $self_ty:ty : {$($impl_ser:tt)*} {$($impl_deser:tt)*} {
+        |$context:ident|
+    $(
+        [$discriminant:expr] $disc_pat:pat => {
+            $([$tag:expr] $field_name:ident: $field_type:ty = $accessor:expr,)*
+            { $constructor:expr }
+        }
+    ),* $(,)* }) => {
+        $($impl_ser)* {
+            fn serialize_element<R : ::std::io::Write>
+                (&self, dst: &mut $crate::stream::Stream<R>, tag: u8)
+                -> $crate::stream::Result<()>
+            {
+                match *self {$(
+                    $disc_pat => {
+                        dst.write_enum(tag, $discriminant)?;
+                        fourleaf_retrofit!(@_STRUCT_BODY_SER (dst) {
+                            $([$tag] $accessor,)*
+                        })
+                    },
+                )*}
             }
         }
-    }
+
+        $($impl_deser)* {
+            fourleaf_retrofit!(@_DESER_BOILERPLATE);
+
+            fn deserialize_element($context: &$crate::de::Context,
+                                   field: &mut $crate::stream::Field<R>)
+                                   -> $crate::de::Result<Self> {
+                let (discriminant, stream) = $crate::ms::ResultExt::context(
+                    field.value.to_enum(), $context)?;
+                match discriminant {
+                    $($discriminant => {
+                        fourleaf_retrofit!(@_STRUCT_BODY_DESER
+                                           (stream, $context) {
+                            $([$tag] $field_name: $field_type,)*
+                            { $constructor }
+                        })
+                    },)*
+                    _ => Err($crate::de::Error::UnknownVariant(
+                        $context.to_string(), discriminant)),
+                }
+            }
+        }
+    };
 }
 
 #[cfg(test)]
@@ -145,14 +197,37 @@ mod test {
         pub bar: u64,
     }
 
+    #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+    enum SimpleEnum {
+        Unit,
+        Tuple(u32, u64),
+        Struct { foo: u32, bar: u64 },
+    }
+
     mod declare {
         // Separate module to isolate imports
-        use super::SimpleStruct;
+        use super::{SimpleEnum, SimpleStruct};
+
         fourleaf_retrofit!(struct SimpleStruct : {} {} {
             |_context, this|
             [1] foo: u32 = this.foo,
             [2] bar: u64 = this.bar,
             { Ok(SimpleStruct { foo: foo, bar: bar }) }
+        });
+
+        fourleaf_retrofit!(enum SimpleEnum : {} {} {
+            |_context|
+            [1] SimpleEnum::Unit => { { Ok(SimpleEnum::Unit) } },
+            [2] SimpleEnum::Tuple(a, b) => {
+                [1] a: u32 = a,
+                [2] b: u64 = b,
+                { Ok(SimpleEnum::Tuple(a, b)) }
+            },
+            [3] SimpleEnum::Struct { foo, bar } => {
+                [1] foo: u32 = foo,
+                [2] bar: u64 = bar,
+                { Ok(SimpleEnum::Struct { foo: foo, bar: bar }) }
+            },
         });
     }
 
@@ -161,12 +236,108 @@ mod test {
     use test_helpers::*;
 
     #[test]
-    fn it_basically_works() {
+    fn simple_struct_happy_path() {
         let orig = SimpleStruct { foo: 5, bar: 6 };
         let encoded = to_vec(&orig).unwrap();
         assert_eq!(parse("41 05 42 06 00"), encoded);
 
         let res = from_slice_copy(&encoded, &Config::default()).unwrap();
         assert_eq!(orig, res);
+    }
+
+    #[test]
+    fn simple_struct_ignores_unknown_field_by_default() {
+        let res: SimpleStruct = from_slice_copy(&parse(
+            "41 05 42 06 43 07 00"), &Config::default()).unwrap();
+        assert_eq!(SimpleStruct { foo: 5, bar: 6 }, res);
+    }
+
+    #[test]
+    fn simple_struct_unknown_field_error() {
+        let mut config = Config::default();
+        config.ignore_unknown_fields = false;
+
+        match from_slice_copy::<SimpleStruct>(&parse(
+            "41 05 42 06 43 07 00"), &config)
+        {
+            Ok(r) => panic!("unexpectedly succeeded: {:?}", r),
+            Err(Error::UnknownField(_, 3, _)) => (),
+            Err(e) => panic!("failed for wrong reason: {}", e),
+        }
+    }
+
+    #[test]
+    fn simple_enum_unit_happy_path() {
+        let orig = SimpleEnum::Unit;
+        let encoded = to_vec(&orig).unwrap();
+        assert_eq!(parse("01 01 00 00"), encoded);
+
+        let res = from_slice_copy(&encoded, &Config::default()).unwrap();
+        assert_eq!(orig, res);
+    }
+
+    #[test]
+    fn simple_enum_tuple_happy_path() {
+        let orig = SimpleEnum::Tuple(5, 6);
+        let encoded = to_vec(&orig).unwrap();
+        assert_eq!(parse("01 02 41 05 42 06 00 00"), encoded);
+
+        let res = from_slice_copy(&encoded, &Config::default()).unwrap();
+        assert_eq!(orig, res);
+    }
+
+    #[test]
+    fn simple_enum_struct_happy_path() {
+        let orig = SimpleEnum::Struct { foo: 5, bar: 6 };
+        let encoded = to_vec(&orig).unwrap();
+        assert_eq!(parse("01 03 41 05 42 06 00 00"), encoded);
+
+        let res = from_slice_copy(&encoded, &Config::default()).unwrap();
+        assert_eq!(orig, res);
+    }
+
+    #[test]
+    fn simple_enum_ignores_unknown_field_by_default() {
+        let res: SimpleEnum = from_slice_copy(&parse(
+            "01 01 41 2A 00 42 2B 00"), &Config::default()).unwrap();
+        assert_eq!(SimpleEnum::Unit, res);
+    }
+
+    #[test]
+    fn simple_enum_unknown_field_error_inner() {
+        let mut config = Config::default();
+        config.ignore_unknown_fields = false;
+
+        match from_slice_copy::<SimpleEnum>(&parse(
+            "01 01 43 2A 00 00"), &config)
+        {
+            Ok(r) => panic!("unexpectedly succeeded: {:?}", r),
+            Err(Error::UnknownField(_, 3, _)) => (),
+            Err(e) => panic!("failed for wrong reason: {}", e),
+        }
+    }
+
+    #[test]
+    fn simple_enum_unknown_field_error_outer() {
+        let mut config = Config::default();
+        config.ignore_unknown_fields = false;
+
+        match from_slice_copy::<SimpleEnum>(&parse(
+            "01 01 00 43 2A 00"), &config)
+        {
+            Ok(r) => panic!("unexpectedly succeeded: {:?}", r),
+            Err(Error::UnknownField(_, 3, _)) => (),
+            Err(e) => panic!("failed for wrong reason: {}", e),
+        }
+    }
+
+    #[test]
+    fn simple_enum_unknown_variant() {
+        match from_slice_copy::<SimpleEnum>(&parse("01 04 00 00"),
+                                            &Config::default()) {
+            Ok(r) => panic!("unexpectedly succeeded: {:?}", r),
+            Err(Error::UnknownVariant(_, 4)) => (),
+            Err(e) => panic!("failed for wrong reason: {}", e),
+        }
     }
 }
