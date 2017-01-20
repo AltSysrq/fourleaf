@@ -9,6 +9,55 @@
 
 #[macro_export]
 macro_rules! fourleaf_retrofit {
+    (@_STRUCT_BODY_SER ($dst:expr) {
+        $([$tag:expr] $accessor:expr,)*
+    }) => { {
+        $(
+            $crate::ser::Serialize::serialize_field(
+                &$accessor, $dst, $tag)?;
+        )*
+        $dst.write_end_struct()
+    } };
+
+    (@_STRUCT_BODY_DESER ($stream:expr, $context:expr) {
+        $([$tag:expr] $field_name:ident: $field_type:ty,)*
+        { $constructor:expr }
+    }) => { {
+        $(let mut $field_name =
+          <<$field_type as $crate::de::Deserialize<R, STYLE>>::Accum
+          as Default>::default();
+        )*
+
+        while let Some(mut _field) =
+            $crate::ms::ResultExt::context(
+                $stream.next_field(), $context)?
+        {
+            match _field.tag {
+                $( $tag => {
+                    let subcontext = $context.push(
+                        stringify!($field_name), _field.pos)?;
+                    <$field_type as $crate::de::Deserialize<R, STYLE>>::
+                    deserialize_field(&mut $field_name, &subcontext,
+                                      &mut _field)?;
+                })*
+                _ => {
+                    $context.unknown_field(&_field)?;
+                    $crate::ms::ResultExt::context(_field.skip(), $context)?
+                },
+            }
+        }
+
+        $(
+            let subcontext = $context.push(stringify!($field_name),
+                                           $stream.pos())?;
+            let $field_name = <$field_type as
+                $crate::de::Deserialize<R, STYLE>>::
+            finish($field_name, &subcontext)?;
+        )*
+
+        $constructor
+    } };
+
     ($form:tt $self_ty:ty : {} $impl_deser:tt $body:tt) => {
         fourleaf_retrofit!($form $self_ty : {
             impl $crate::ser::Serialize for $self_ty
@@ -20,7 +69,7 @@ macro_rules! fourleaf_retrofit {
             for $self_ty } $body);
     };
     (struct $self_ty:ty : {$($impl_ser:tt)*} {$($impl_deser:tt)*} {
-        |$this:ident|
+        |$context:ident, $this:ident|
     $(
         [$tag:expr] $field_name:ident: $field_type:ty = $accessor:expr,
     )* { $constructor:expr } }) => {
@@ -30,11 +79,9 @@ macro_rules! fourleaf_retrofit {
                 -> $crate::stream::Result<()>
             {
                 let $this = self;
-                $(
-                    $crate::ser::Serialize::serialize_field(
-                        &$accessor, dst, $tag)?;
-                )*
-                dst.write_end_struct()
+                fourleaf_retrofit!(@_STRUCT_BODY_SER (dst) {
+                    $([$tag] $accessor,)*
+                })
             }
 
             fn serialize_element<R : ::std::io::Write>
@@ -49,40 +96,13 @@ macro_rules! fourleaf_retrofit {
         $($impl_deser)* {
             type Accum = Option<Self>;
 
-            fn deserialize_top_level(context: &$crate::de::Context,
+            fn deserialize_top_level($context: &$crate::de::Context,
                                      stream: &mut $crate::stream::Stream<R>)
                                      -> $crate::de::Result<Self> {
-                $(let mut $field_name =
-                  <<$field_type as $crate::de::Deserialize<R, STYLE>>::Accum
-                  as Default>::default();
-                )*
-
-                while let Some(mut _field) =
-                    $crate::ms::ResultExt::context(
-                        stream.next_field(), context)?
-                { match _field.tag {
-                    $( $tag => {
-                        let subcontext = context.push(
-                            stringify!($field_name), _field.pos)?;
-                        <$field_type as $crate::de::Deserialize<R, STYLE>>::
-                        deserialize_field(&mut $field_name, &subcontext,
-                                          &mut _field)?;
-                    })*
-                    _ => {
-                        context.unknown_field(&_field)?;
-                        $crate::ms::ResultExt::context(_field.skip(), context)?
-                    },
-                } }
-
-                $(
-                    let subcontext = context.push(stringify!($field_name),
-                                                  stream.pos())?;
-                    let $field_name = <$field_type as
-                        $crate::de::Deserialize<R, STYLE>>::
-                        finish($field_name, &subcontext)?;
-                )*
-
-                Ok($constructor)
+                fourleaf_retrofit!(@_STRUCT_BODY_DESER (stream, $context) {
+                    $([$tag] $field_name: $field_type,)*
+                    { $constructor }
+                })
             }
 
             fn deserialize_field(accum: &mut Option<Self>,
@@ -129,10 +149,10 @@ mod test {
         // Separate module to isolate imports
         use super::SimpleStruct;
         fourleaf_retrofit!(struct SimpleStruct : {} {} {
-            |this|
+            |_context, this|
             [1] foo: u32 = this.foo,
             [2] bar: u64 = this.bar,
-            { SimpleStruct { foo: foo, bar: bar } }
+            { Ok(SimpleStruct { foo: foo, bar: bar }) }
         });
     }
 
