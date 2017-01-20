@@ -100,7 +100,7 @@ macro_rules! fourleaf_retrofit {
         [$tag:expr] $field_name:ident: $field_type:ty = $accessor:expr,
     )* { $constructor:expr } }) => {
         $($impl_ser)* {
-            fn serialize_top_level<R : ::std::io::Write>
+            fn serialize_body<R : ::std::io::Write>
                 (&self, dst: &mut $crate::stream::Stream<R>)
                 -> $crate::stream::Result<()>
             {
@@ -115,16 +115,16 @@ macro_rules! fourleaf_retrofit {
                  -> $crate::stream::Result<()>
             {
                 dst.write_struct(tag)?;
-                <Self as $crate::ser::Serialize>::serialize_top_level(self, dst)
+                <Self as $crate::ser::Serialize>::serialize_body(self, dst)
             }
         }
 
         $($impl_deser)* {
             fourleaf_retrofit!(@_DESER_BOILERPLATE);
 
-            fn deserialize_top_level($context: &$crate::de::Context,
-                                     stream: &mut $crate::stream::Stream<R>)
-                                     -> $crate::de::Result<Self> {
+            fn deserialize_body($context: &$crate::de::Context,
+                                stream: &mut $crate::stream::Stream<R>)
+                                -> $crate::de::Result<Self> {
                 fourleaf_retrofit!(@_STRUCT_BODY_DESER (stream, $context) {
                     $([$tag] $field_name: $field_type,)*
                     { $constructor }
@@ -135,7 +135,7 @@ macro_rules! fourleaf_retrofit {
                                    field: &mut $crate::stream::Field<R>)
                                    -> $crate::de::Result<Self> {
                 <Self as $crate::de::Deserialize<R, STYLE>>::
-                deserialize_top_level(context, $crate::ms::ResultExt::context(
+                deserialize_body(context, $crate::ms::ResultExt::context(
                     field.value.to_struct(), context)?)
             }
         }

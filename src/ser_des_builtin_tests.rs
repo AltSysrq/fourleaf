@@ -26,7 +26,7 @@ macro_rules! tcase {
             let mut encoded = Vec::new();
             {
                 let mut stream = Stream::new(&mut encoded);
-                orig.serialize_top_level(&mut stream).unwrap();
+                orig.serialize_body(&mut stream).unwrap();
                 stream.commit().unwrap();
             }
 
@@ -39,7 +39,7 @@ macro_rules! tcase {
                 {
                     let config = Config::default();
                     let context = Context::top(&config);
-                    T::deserialize_top_level(&context, stream).unwrap()
+                    T::deserialize_body(&context, stream).unwrap()
                 }
 
                 let result: $ty = deser(&mut stream);
@@ -327,7 +327,7 @@ fn binary_heap_basically_works() {
     let mut encoded = Vec::new();
     {
         let mut stream = Stream::new(&mut encoded);
-        orig.serialize_top_level(&mut stream).unwrap();
+        orig.serialize_body(&mut stream).unwrap();
         stream.commit().unwrap();
     }
 

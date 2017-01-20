@@ -16,7 +16,7 @@ use stream::{Result, Stream};
 /// Serialises `t` into a `Vec<u8>`.
 pub fn to_vec<T : Serialize>(t: T) -> Result<Vec<u8>> {
     let mut stream = Stream::new(Vec::new());
-    t.serialize_top_level(&mut stream)?;
+    t.serialize_body(&mut stream)?;
     stream.commit()?;
     Ok(stream.into_inner())
 }
@@ -32,7 +32,7 @@ pub fn to_vec<T : Serialize>(t: T) -> Result<Vec<u8>> {
 pub fn to_writer<T : Serialize, W : Write>(writer: &mut W, t: T)
                                            -> Result<()> {
     let mut stream = Stream::new(writer);
-    t.serialize_top_level(&mut stream)?;
+    t.serialize_body(&mut stream)?;
     stream.commit()?;
     Ok(())
 }
@@ -45,23 +45,24 @@ pub fn to_writer<T : Serialize, W : Write>(writer: &mut W, t: T)
 pub fn to_stream<T : Serialize, R : Write>(stream: &mut Stream<R>,
                                            t: T)
                                            -> Result<()> {
-    t.serialize_top_level(stream)?;
+    t.serialize_body(stream)?;
     stream.commit()?;
     Ok(())
 }
 
 /// Trait for serialising values via fourleaf.
 pub trait Serialize {
-    /// Serialises this value, which is at top-level.
+    /// Serialises this value, which is at top-level or the tail part of a
+    /// struct.
     ///
-    /// There are no particular requirements here, except that the format of
-    /// the result must be such that the corresponding deserialisation method
-    /// is able to determine when to stop.
+    /// The callee shall write any number (including zero) of field elements
+    /// with balanced `EndOfStruct` elements, followed by exactly one
+    /// `EndOfStruct` element.
     ///
     /// By default, this calls `serialize_field` with a tag of 1 and then
     /// writes an end-of-struct.
-    fn serialize_top_level<R : Write>(&self, dst: &mut Stream<R>)
-                                      -> Result<()> {
+    fn serialize_body<R : Write>(&self, dst: &mut Stream<R>)
+                                 -> Result<()> {
         self.serialize_field(dst, 1)?;
         dst.write_end_struct()
     }
@@ -110,9 +111,9 @@ pub trait SerializeAs {
 }
 
 impl<T : SerializeAs + ?Sized> Serialize for T {
-    fn serialize_top_level<R : Write>(&self, dst: &mut Stream<R>)
-                                      -> Result<()> {
-        self.serialize_as().serialize_top_level(dst)
+    fn serialize_body<R : Write>(&self, dst: &mut Stream<R>)
+                                 -> Result<()> {
+        self.serialize_as().serialize_body(dst)
     }
     fn serialize_field<R : Write>(&self, dst: &mut Stream<R>, tag: u8)
                                   -> Result<()> {
@@ -306,7 +307,7 @@ ser_array!(16777216);
 macro_rules! ser_tuple {
     ($($t:ident : $v:tt),*) => {
         impl <$($t : Serialize),*> Serialize for ($($t,)*) {
-            fn serialize_top_level<R : Write>
+            fn serialize_body<R : Write>
                 (&self, dst: &mut Stream<R>) -> Result<()>
             {
                 $(self.$v.serialize_field(dst, $v + 1)?;)*
@@ -317,7 +318,7 @@ macro_rules! ser_tuple {
                 (&self, dst: &mut Stream<R>, tag: u8) -> Result<()>
             {
                 dst.write_struct(tag)?;
-                self.serialize_top_level(dst)
+                self.serialize_body(dst)
             }
         }
     }
@@ -466,11 +467,11 @@ macro_rules! ser_struct {
             fn serialize_element<R : Write>(&self, dst: &mut Stream<R>,
                                             tag: u8) -> Result<()> {
                 dst.write_struct(tag)?;
-                self.serialize_top_level(dst)
+                self.serialize_body(dst)
             }
 
-            fn serialize_top_level<R : Write>(&self, dst: &mut Stream<R>)
-                                              -> Result<()> {
+            fn serialize_body<R : Write>(&self, dst: &mut Stream<R>)
+                                         -> Result<()> {
                 $(
                     self.$field().serialize_field(dst, $tag)?;
                 )*

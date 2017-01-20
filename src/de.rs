@@ -34,7 +34,7 @@ use stream;
 pub fn from_stream_copy<R : Read, T : Deserialize<R, style::Copying>>
     (stream: &mut stream::Stream<R>, config: &Config) -> Result<T>
 {
-    T::deserialize_top_level(&Context::top(config), stream)
+    T::deserialize_body(&Context::top(config), stream)
 }
 
 /// Deserialises an instance of `T` from the given `stream`.
@@ -51,7 +51,7 @@ pub fn from_stream_copy<R : Read, T : Deserialize<R, style::Copying>>
 pub fn from_stream_borrow<R : Read, T : Deserialize<R, style::ZeroCopy>>
     (stream: &mut stream::Stream<R>, config: &Config) -> Result<T>
 {
-    T::deserialize_top_level(&Context::top(config), stream)
+    T::deserialize_body(&Context::top(config), stream)
 }
 
 /// Deserialises an instance of `T` from the given `reader`.
@@ -69,7 +69,7 @@ pub fn from_reader<R : Read, T : Deserialize<R, style::Copying>>
     (reader: R, config: &Config) -> Result<T>
 {
     let mut stream = stream::Stream::new(reader);
-    T::deserialize_top_level(&Context::top(config), &mut stream)
+    T::deserialize_body(&Context::top(config), &mut stream)
 }
 
 /// Deserialises an instance of `T` from the given byte slice.
@@ -86,7 +86,7 @@ pub fn from_slice_copy<'a, T : Deserialize<TransparentCursor<&'a [u8]>,
     (bytes: &'a [u8], config: &Config) -> Result<T>
 {
     let mut stream = stream::Stream::from_slice(bytes);
-    T::deserialize_top_level(&Context::top(config), &mut stream)
+    T::deserialize_body(&Context::top(config), &mut stream)
 }
 
 /// Deserialises an instance of `T` from the given byte slice.
@@ -103,7 +103,7 @@ pub fn from_slice_borrow<'a, T : Deserialize<TransparentCursor<&'a [u8]>,
     (bytes: &'a [u8], config: &Config) -> Result<T>
 {
     let mut stream = stream::Stream::from_slice(bytes);
-    T::deserialize_top_level(&Context::top(config), &mut stream)
+    T::deserialize_body(&Context::top(config), &mut stream)
 }
 
 quick_error! {
@@ -374,11 +374,13 @@ pub trait Deserialize<R : Read, STYLE = style::Copying> : Sized {
     /// before starting deserialisation.
     type Accum : Default + Sized;
 
-    /// Deserialises this type from a top-level stream.
+    /// Deserialises this type from a top-level stream or from the tail portion
+    /// of a struct. If this call succeeds, all field elements up to and
+    /// including the closing `EndOfStruct` element are consumed.
     ///
     /// The default inverts the default implementation of
-    /// `Serialize::serialize_top_level`.
-    fn deserialize_top_level
+    /// `Serialize::serialize_body`.
+    fn deserialize_body
         (context: &Context, stream: &mut stream::Stream<R>)
         -> Result<Self>
     {
@@ -742,11 +744,11 @@ impl<R : Read, STYLE, T : Deserialize<R, STYLE>> Deserialize<R, STYLE>
 for $($what)*<T> {
     type Accum = T::Accum;
 
-    fn deserialize_top_level
+    fn deserialize_body
         (context: &Context, stream: &mut stream::Stream<R>)
         -> Result<Self>
     {
-        T::deserialize_top_level(context, stream).map($($what)*::new)
+        T::deserialize_body(context, stream).map($($what)*::new)
     }
 
     fn deserialize_field
@@ -776,12 +778,12 @@ impl<'a, R : Read, T : ?Sized + ToOwned> Deserialize<R, style::Copying>
 for Cow<'a, T> where T::Owned : Deserialize<R, style::Copying> {
     type Accum = <T::Owned as Deserialize<R, style::Copying>>::Accum;
 
-    fn deserialize_top_level
+    fn deserialize_body
         (context: &Context, stream: &mut stream::Stream<R>)
         -> Result<Self>
     {
         <T::Owned as Deserialize<R, style::Copying>>::
-        deserialize_top_level(context, stream).map(Cow::Owned)
+        deserialize_body(context, stream).map(Cow::Owned)
     }
 
     fn deserialize_field
@@ -810,12 +812,12 @@ impl<'a, R : Read, T : ?Sized + ToOwned> Deserialize<R, style::ZeroCopy>
 for Cow<'a, T> where &'a T : Deserialize<R, style::ZeroCopy> {
     type Accum = <&'a T as Deserialize<R, style::ZeroCopy>>::Accum;
 
-    fn deserialize_top_level
+    fn deserialize_body
         (context: &Context, stream: &mut stream::Stream<R>)
         -> Result<Self>
     {
         <&'a T as Deserialize<R, style::ZeroCopy>>::
-        deserialize_top_level(context, stream).map(Cow::Borrowed)
+        deserialize_body(context, stream).map(Cow::Borrowed)
     }
 
     fn deserialize_field
@@ -994,7 +996,7 @@ macro_rules! des_small_array {
                     return handled;
                 }
 
-                Self::deserialize_top_level(
+                Self::deserialize_body(
                     context, field.value.to_struct().context(context)?)
             }
 
@@ -1147,7 +1149,7 @@ macro_rules! des_struct {
      $($tag:tt : $field:ident: $t:ty,)*) => { $($stuff)* {
          type Accum = Option<Self>;
 
-         fn deserialize_top_level(context: &Context,
+         fn deserialize_body(context: &Context,
                                   stream: &mut stream::Stream<R>)
                                   -> Result<Self> {
              Ok(des_struct_body! {
@@ -1174,7 +1176,7 @@ macro_rules! des_struct {
          fn deserialize_element(context: &Context,
                                 field: &mut stream::Field<R>)
                                 -> Result<Self> {
-             <Self as Deserialize<R, STYLE>>::deserialize_top_level(
+             <Self as Deserialize<R, STYLE>>::deserialize_body(
                  context, field.value.to_struct().context(context)?)
          }
 
@@ -1251,7 +1253,7 @@ Deserialize<R, STYLE> for Vec<T> {
             return handled;
         }
 
-        Self::deserialize_top_level(
+        Self::deserialize_body(
             context, field.value.to_struct().context(context)?)
     }
 
@@ -1292,7 +1294,7 @@ $($stuff)* {
     fn deserialize_element
         (context: &Context, field: &mut stream::Field<R>) -> Result<Self>
     {
-        Self::deserialize_top_level(
+        Self::deserialize_body(
             context, field.value.to_struct().context(context)?)
     }
 
@@ -1336,7 +1338,7 @@ for Option<T> {
     fn deserialize_element
         (context: &Context, field: &mut stream::Field<R>) -> Result<Self>
     {
-        Self::deserialize_top_level(
+        Self::deserialize_body(
             context, field.value.to_struct().context(context)?)
     }
 
@@ -1366,7 +1368,7 @@ $($stuff)* {
     fn deserialize_element
         (context: &Context, field: &mut stream::Field<R>) -> Result<Self>
     {
-        Self::deserialize_top_level(
+        Self::deserialize_body(
             context, field.value.to_struct().context(context)?)
     }
 
