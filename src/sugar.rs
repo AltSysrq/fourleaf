@@ -12,14 +12,19 @@ macro_rules! fourleaf_retrofit {
     (@_STRUCT_BODY_SER ($dst:expr) {
         $([$tag:expr] $accessor:expr,)*
         $((*) $del_accessor:expr,)*
+        $((?) $unk_accessor:expr,)*
     }) => { {
         $($crate::ser::Serialize::serialize_field(
             &$accessor, $dst, $tag)?;)*
         let mut _terminated = false;
         $({
             assert!(!_terminated);
-            $crate::ser::Serialize::serialize_body(
-                &$del_accessor, $dst)?;
+            $crate::ser::Serialize::serialize_body(&$del_accessor, $dst)?;
+            _terminated = true;
+        })*
+        $({
+            assert!(!_terminated);
+            $crate::ser::Serialize::serialize_body(&$unk_accessor, $dst)?;
             _terminated = true;
         })*
         if !_terminated {
@@ -37,13 +42,23 @@ macro_rules! fourleaf_retrofit {
         )*
     } };
 
+    (@_STRUCT_ELEMENT_SER ($dst:expr, $tag:expr) {
+        $((?) $unk_accessor:expr,)*
+    }) => { {
+    } };
+
     (@_STRUCT_BODY_DESER ($stream:expr, $context:expr) {
         $([$tag:expr] $field_name:ident: $field_type:ty,)*
         $((*) $del_field_name:ident: $del_field_type:ty,)*
+        $((?) $unk_field_name:ident: $unk_field_type:ty,)*
         { $constructor:expr }
     }) => { {
         $(let mut $field_name =
           <<$field_type as $crate::de::Deserialize<R, STYLE>>::Accum
+          as Default>::default();
+        )*
+        $(let mut $unk_field_name =
+          <<$unk_field_type as $crate::de::Deserialize<R, STYLE>>::Accum
           as Default>::default();
         )*
 
@@ -72,8 +87,22 @@ macro_rules! fourleaf_retrofit {
                                       &mut _field)?;
                 })*
                 _ => {
-                    $context.unknown_field(&_field)?;
-                    $crate::ms::ResultExt::context(_field.skip(), $context)?
+                    let mut _handled = false;
+                    $({
+                        let mut name = [0u8;2];
+                        <$unk_field_type as $crate::de::Deserialize<R, STYLE>>::
+                            deserialize_field(
+                                &mut $unk_field_name,
+                                &$context.push_tag(&mut name, _field.tag,
+                                                   _field.pos)?,
+                                &mut _field)?;
+                        _handled = true;
+                    })*
+                    if !_handled {
+                        $context.unknown_field(&_field)?;
+                        $crate::ms::ResultExt::context(
+                            _field.skip(), $context)?;
+                    }
                 },
             }
         } }
@@ -84,6 +113,13 @@ macro_rules! fourleaf_retrofit {
             let $field_name = <$field_type as
                 $crate::de::Deserialize<R, STYLE>>::
                     finish($field_name, &subcontext)?;
+        )*
+        $(
+            let subcontext = $context.push(stringify!($unk_field_name),
+                                           $stream.pos())?;
+            let $unk_field_name = <$unk_field_type as
+                $crate::de::Deserialize<R, STYLE>>::
+                    finish($unk_field_name, &subcontext)?;
         )*
 
         $constructor
@@ -101,6 +137,12 @@ macro_rules! fourleaf_retrofit {
                     deserialize_element(&subcontext, $field)?;
             return $constructor;
         )*
+    } };
+
+    (@_STRUCT_ELEMENT_DESER ($context:expr, $field:expr) {
+        $((?) $unk_field_name:ident: $unk_field_type:ty,)*
+        { $constructor:expr }
+    }) => { {
     } };
 
     (@_DESER_BOILERPLATE) => {
@@ -259,6 +301,8 @@ macro_rules! fourleaf_retrofit {
 
 #[cfg(test)]
 mod test {
+    use unknown::UnknownFields;
+
     #[derive(Debug, Clone, Copy, PartialEq, Eq)]
     struct SimpleStruct {
         pub foo: u32,
@@ -281,9 +325,17 @@ mod test {
         Deleg(SimpleStruct),
     }
 
+    #[derive(Debug, Clone, PartialEq, Eq)]
+    struct UnknownPreserving {
+        pub foo: u32,
+        pub unknown: UnknownFields<'static>,
+    }
+
     mod declare {
         // Separate module to isolate imports
-        use super::{SimpleEnum, SimpleStruct, DelegatingEnum, DelegatingStruct};
+        use super::{SimpleEnum, SimpleStruct,
+                    DelegatingEnum, DelegatingStruct,
+                    UnknownPreserving};
 
         fourleaf_retrofit!(struct SimpleStruct : {} {} {
             |_context, this|
@@ -320,6 +372,17 @@ mod test {
                 (*) inner: SimpleStruct = inner,
                 { Ok(DelegatingEnum::Deleg(inner)) }
             },
+        });
+
+        fourleaf_retrofit!(struct UnknownPreserving : {} {
+            impl<R : ::std::io::Read, STYLE>
+            ::de::Deserialize<R, STYLE> for UnknownPreserving
+            where ::unknown::UnknownFields<'static> : ::de::Deserialize<R, STYLE>
+        } {
+            |_context, this|
+            [1] foo: u32 = this.foo,
+            (?) unknown: ::unknown::UnknownFields<'static> = this.unknown,
+            { Ok(UnknownPreserving { foo: foo, unknown: unknown }) }
         });
     }
 
@@ -450,6 +513,23 @@ mod test {
         assert_eq!(parse("01 02 41 05 42 06 00 00"), encoded);
 
         let res = from_slice_copy(&encoded, &Config::default()).unwrap();
+        assert_eq!(orig, res);
+    }
+
+    #[test]
+    fn unknown_fields_collected_in_unknown() {
+        let mut config = Config::default();
+        config.ignore_unknown_fields = false;
+
+        let orig = parse("41 2A 42 2B 43 2C 00");
+        let parsed = from_slice_copy::<UnknownPreserving>(&orig, &config)
+            .unwrap();
+        assert_eq!(42, parsed.foo);
+        assert_eq!(2, parsed.unknown.0.len());
+        assert_eq!(2, parsed.unknown.0[0].0);
+        assert_eq!(3, parsed.unknown.0[1].0);
+
+        let res = to_vec(parsed).unwrap();
         assert_eq!(orig, res);
     }
 }
