@@ -280,6 +280,15 @@ impl<'a> Context<'a> {
         }
     }
 
+    /// Like `push()`, but the name of the field is the base-10 representation
+    /// of `tag` saved in `data`.
+    pub fn push_tag(&'a self, name: &'a mut [u8;2], tag: u8, pos: u64)
+                    -> Result<Self> {
+        name[0] = b'0' + tag / 10;
+        name[1] = b'0' + tag % 10;
+        Self::push(self, str::from_utf8(&name[..]).unwrap(), pos)
+    }
+
     /// If unknown fields are to result in an error, return such an error.
     /// Otherwise, return `Ok(())`.
     pub fn unknown_field<R>(&self, field: &stream::Field<R>)

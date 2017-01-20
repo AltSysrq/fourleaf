@@ -19,6 +19,7 @@ pub mod wire;
 pub mod stream;
 pub mod ser;
 pub mod de;
+pub mod unknown;
 #[allow(missing_docs)] #[doc(hidden)]
 #[macro_use] pub mod sugar;
 mod retrofit;
@@ -43,3 +44,4 @@ pub use self::ser::to_stream;
 pub use self::ser::to_vec;
 pub use self::ser::to_writer;
 pub use self::stream::Stream;
+pub use self::unknown::UnknownFields;
