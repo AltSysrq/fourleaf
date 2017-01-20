@@ -28,6 +28,15 @@ macro_rules! fourleaf_retrofit {
         Ok(())
     } };
 
+    (@_STRUCT_ELEMENT_SER ($dst:expr, $tag:expr) {
+        $((*) $del_accessor:expr,)*
+    }) => { {
+        $(
+            return $crate::ser::Serialize::serialize_element(
+                &$del_accessor, $dst, $tag);
+        )*
+    } };
+
     (@_STRUCT_BODY_DESER ($stream:expr, $context:expr) {
         $([$tag:expr] $field_name:ident: $field_type:ty,)*
         $((*) $del_field_name:ident: $del_field_type:ty,)*
@@ -78,6 +87,20 @@ macro_rules! fourleaf_retrofit {
         )*
 
         $constructor
+    } };
+
+    (@_STRUCT_ELEMENT_DESER ($context:expr, $field:expr) {
+        $((*) $del_field_name:ident: $del_field_type:ty,)*
+        { $constructor:expr }
+    }) => { {
+        $(
+            let subcontext = $context.push(
+                stringify!($del_field_name), $field.pos)?;
+            let $del_field_name =
+                <$del_field_type as $crate::de::Deserialize<R, STYLE>>::
+                    deserialize_element(&subcontext, $field)?;
+            return $constructor;
+        )*
     } };
 
     (@_DESER_BOILERPLATE) => {
@@ -138,10 +161,16 @@ macro_rules! fourleaf_retrofit {
                 })
             }
 
+            #[allow(unreachable_code)]
             fn serialize_element<R : ::std::io::Write>
                 (&self, dst: &mut $crate::stream::Stream<R>, tag: u8)
                  -> $crate::stream::Result<()>
             {
+                let $this = self;
+                let _ = $this;
+                fourleaf_retrofit!(@_STRUCT_ELEMENT_SER (dst, tag) {
+                    $(($special) $s_accessor,)*
+                });
                 dst.write_struct(tag)?;
                 <Self as $crate::ser::Serialize>::serialize_body(self, dst)
             }
@@ -160,12 +189,18 @@ macro_rules! fourleaf_retrofit {
                 })
             }
 
+            #[allow(unreachable_code)]
             fn deserialize_element(context: &$crate::de::Context,
                                    field: &mut $crate::stream::Field<R>)
                                    -> $crate::de::Result<Self> {
+                fourleaf_retrofit!(@_STRUCT_ELEMENT_DESER (context, field) {
+                    $(($special) $s_field_name: $s_field_type,)*
+                    { $constructor }
+                });
+
                 <Self as $crate::de::Deserialize<R, STYLE>>::
-                deserialize_body(context, $crate::ms::ResultExt::context(
-                    field.value.to_struct(), context)?)
+                    deserialize_body(context, $crate::ms::ResultExt::context(
+                        field.value.to_struct(), context)?)
             }
         }
     };

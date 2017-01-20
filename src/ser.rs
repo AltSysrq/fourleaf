@@ -480,6 +480,3 @@ macro_rules! ser_struct {
         }
     }
 }
-
-// TODO: Duration, Ipv4Addr, Ipv6Addr, IpAddr, SocketAddrV4, SocketAddrV6,
-// SocketAddr, Result once other things here are more stabilised.
