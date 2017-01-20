@@ -14,14 +14,14 @@ use std::net::{IpAddr, Ipv4Addr, Ipv6Addr};
 
 fourleaf_retrofit!(struct Ipv4Addr : {} {} {
     |_context, this|
-    [1] octets: [u8;4] = this.octets(),
+    (*) octets: [u8;4] = this.octets(),
     { Ok(Ipv4Addr::new(octets[0], octets[1], octets[2], octets[3])) }
 });
 
 
 fourleaf_retrofit!(struct Ipv6Addr : {} {} {
     |_context, this|
-    [1] octets: [u8;16] = this.octets(),
+    (*) octets: [u8;16] = this.octets(),
     { {
         macro_rules! seg {
             ($n:expr) => {
@@ -36,12 +36,11 @@ fourleaf_retrofit!(struct Ipv6Addr : {} {} {
 fourleaf_retrofit!(enum IpAddr : {} {} {
     |_context|
     [4] IpAddr::V4(ip) => {
-        // TODO This should delegate instead of nesting
-        [1] ip: Ipv4Addr = ip,
+        (*) ip: Ipv4Addr = ip,
         { Ok(IpAddr::V4(ip)) }
     },
     [6] IpAddr::V6(ip) => {
-        [1] ip: Ipv6Addr = ip,
+        (*) ip: Ipv6Addr = ip,
         { Ok(IpAddr::V6(ip)) }
     },
 });

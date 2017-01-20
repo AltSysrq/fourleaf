@@ -11,16 +11,26 @@
 macro_rules! fourleaf_retrofit {
     (@_STRUCT_BODY_SER ($dst:expr) {
         $([$tag:expr] $accessor:expr,)*
+        $((*) $del_accessor:expr,)*
     }) => { {
-        $(
-            $crate::ser::Serialize::serialize_field(
-                &$accessor, $dst, $tag)?;
-        )*
-        $dst.write_end_struct()
+        $($crate::ser::Serialize::serialize_field(
+            &$accessor, $dst, $tag)?;)*
+        let mut _terminated = false;
+        $({
+            assert!(!_terminated);
+            $crate::ser::Serialize::serialize_body(
+                &$del_accessor, $dst)?;
+            _terminated = true;
+        })*
+        if !_terminated {
+            $dst.write_end_struct()?;
+        }
+        Ok(())
     } };
 
     (@_STRUCT_BODY_DESER ($stream:expr, $context:expr) {
         $([$tag:expr] $field_name:ident: $field_type:ty,)*
+        $((*) $del_field_name:ident: $del_field_type:ty,)*
         { $constructor:expr }
     }) => { {
         $(let mut $field_name =
@@ -28,7 +38,19 @@ macro_rules! fourleaf_retrofit {
           as Default>::default();
         )*
 
-        while let Some(mut _field) =
+        let mut _consumed = false;
+        $(
+            assert!(!_consumed);
+            let $del_field_name = {
+                let subcontext = $context.push(
+                    stringify!($del_field_name), $stream.pos())?;
+                <$del_field_type as $crate::de::Deserialize<R, STYLE>>::
+                    deserialize_body(&subcontext, $stream)?
+            };
+            _consumed = true;
+        )*;
+
+        if !_consumed { while let Some(mut _field) =
             $crate::ms::ResultExt::context(
                 $stream.next_field(), $context)?
         {
@@ -45,14 +67,14 @@ macro_rules! fourleaf_retrofit {
                     $crate::ms::ResultExt::context(_field.skip(), $context)?
                 },
             }
-        }
+        } }
 
         $(
             let subcontext = $context.push(stringify!($field_name),
                                            $stream.pos())?;
             let $field_name = <$field_type as
                 $crate::de::Deserialize<R, STYLE>>::
-            finish($field_name, &subcontext)?;
+                    finish($field_name, &subcontext)?;
         )*
 
         $constructor
@@ -96,9 +118,14 @@ macro_rules! fourleaf_retrofit {
     };
     (struct $self_ty:ty : {$($impl_ser:tt)*} {$($impl_deser:tt)*} {
         |$context:ident, $this:ident|
-    $(
-        [$tag:expr] $field_name:ident: $field_type:ty = $accessor:expr,
-    )* { $constructor:expr } }) => {
+        $(
+            [$tag:expr] $field_name:ident: $field_type:ty = $accessor:expr,
+        )*
+        $(
+            ($special:tt) $s_field_name:ident: $s_field_type:ty =
+                $s_accessor:expr,
+        )*
+        { $constructor:expr } }) => {
         $($impl_ser)* {
             fn serialize_body<R : ::std::io::Write>
                 (&self, dst: &mut $crate::stream::Stream<R>)
@@ -107,6 +134,7 @@ macro_rules! fourleaf_retrofit {
                 let $this = self;
                 fourleaf_retrofit!(@_STRUCT_BODY_SER (dst) {
                     $([$tag] $accessor,)*
+                    $(($special) $s_accessor,)*
                 })
             }
 
@@ -127,6 +155,7 @@ macro_rules! fourleaf_retrofit {
                                 -> $crate::de::Result<Self> {
                 fourleaf_retrofit!(@_STRUCT_BODY_DESER (stream, $context) {
                     $([$tag] $field_name: $field_type,)*
+                    $(($special) $s_field_name: $s_field_type,)*
                     { $constructor }
                 })
             }
@@ -146,6 +175,8 @@ macro_rules! fourleaf_retrofit {
     $(
         [$discriminant:expr] $disc_pat:pat => {
             $([$tag:expr] $field_name:ident: $field_type:ty = $accessor:expr,)*
+            $(($special:tt) $s_field_name:ident: $s_field_type:ty =
+                  $s_accessor:expr,)*
             { $constructor:expr }
         }
     ),* $(,)* }) => {
@@ -159,6 +190,7 @@ macro_rules! fourleaf_retrofit {
                         dst.write_enum(tag, $discriminant)?;
                         fourleaf_retrofit!(@_STRUCT_BODY_SER (dst) {
                             $([$tag] $accessor,)*
+                            $(($special) $s_accessor,)*
                         })
                     },
                 )*}
@@ -178,6 +210,7 @@ macro_rules! fourleaf_retrofit {
                         fourleaf_retrofit!(@_STRUCT_BODY_DESER
                                            (stream, $context) {
                             $([$tag] $field_name: $field_type,)*
+                            $(($special) $s_field_name: $s_field_type,)*
                             { $constructor }
                         })
                     },)*
@@ -204,9 +237,18 @@ mod test {
         Struct { foo: u32, bar: u64 },
     }
 
+    #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+    struct DelegatingStruct(SimpleStruct);
+
+    #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+    enum DelegatingEnum {
+        Unit,
+        Deleg(SimpleStruct),
+    }
+
     mod declare {
         // Separate module to isolate imports
-        use super::{SimpleEnum, SimpleStruct};
+        use super::{SimpleEnum, SimpleStruct, DelegatingEnum, DelegatingStruct};
 
         fourleaf_retrofit!(struct SimpleStruct : {} {} {
             |_context, this|
@@ -227,6 +269,21 @@ mod test {
                 [1] foo: u32 = foo,
                 [2] bar: u64 = bar,
                 { Ok(SimpleEnum::Struct { foo: foo, bar: bar }) }
+            },
+        });
+
+        fourleaf_retrofit!(struct DelegatingStruct : {} {} {
+            |_context, this|
+            (*) it: SimpleStruct = this.0,
+            { Ok(DelegatingStruct(it)) }
+        });
+
+        fourleaf_retrofit!(enum DelegatingEnum : {} {} {
+            |_context|
+            [1] DelegatingEnum::Unit => { { Ok(DelegatingEnum::Unit) } },
+            [2] DelegatingEnum::Deleg(inner) => {
+                (*) inner: SimpleStruct = inner,
+                { Ok(DelegatingEnum::Deleg(inner)) }
             },
         });
     }
@@ -339,5 +396,25 @@ mod test {
             Err(Error::UnknownVariant(_, 4)) => (),
             Err(e) => panic!("failed for wrong reason: {}", e),
         }
+    }
+
+    #[test]
+    fn struct_delegation() {
+        let orig = DelegatingStruct(SimpleStruct { foo: 5, bar: 6 });
+        let encoded = to_vec(&orig).unwrap();
+        assert_eq!(parse("41 05 42 06 00"), encoded);
+
+        let res = from_slice_copy(&encoded, &Config::default()).unwrap();
+        assert_eq!(orig, res);
+    }
+
+    #[test]
+    fn enum_delegation() {
+        let orig = DelegatingEnum::Deleg(SimpleStruct { foo: 5, bar: 6 });
+        let encoded = to_vec(&orig).unwrap();
+        assert_eq!(parse("01 02 41 05 42 06 00 00"), encoded);
+
+        let res = from_slice_copy(&encoded, &Config::default()).unwrap();
+        assert_eq!(orig, res);
     }
 }
