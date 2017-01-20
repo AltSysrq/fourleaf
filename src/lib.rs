@@ -21,6 +21,7 @@ pub mod ser;
 pub mod de;
 #[allow(missing_docs)] #[doc(hidden)]
 #[macro_use] pub mod sugar;
+mod retrofit;
 
 #[allow(missing_docs)]
 #[doc(hidden)] pub mod ms {
