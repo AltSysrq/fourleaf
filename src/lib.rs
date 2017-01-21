@@ -20,6 +20,7 @@ pub mod stream;
 pub mod ser;
 pub mod de;
 pub mod unknown;
+pub mod adapt;
 #[allow(missing_docs)] #[doc(hidden)]
 #[macro_use] pub mod sugar;
 mod retrofit;
