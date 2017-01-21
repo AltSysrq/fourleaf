@@ -256,6 +256,15 @@ macro_rules! fourleaf_retrofit {
                   $s_accessor:expr,)*
             { $constructor:expr }
         }
+    ),* $(,
+        (?) $ca_disc_pat:pat => {
+            (=) $ca_disc_field_name:ident: u64 = $ca_disc_field_accessor:expr,
+            $([$ca_tag:expr] $ca_field_name:ident: $ca_field_type:ty =
+                  $ca_accessor:expr,)*
+            $(($ca_special:tt) $ca_s_field_name:ident: $ca_s_field_type:ty =
+                  $ca_s_accessor:expr,)*
+            { $ca_constructor:expr }
+        }
     ),* $(,)* }) => {
         $($impl_ser)* {
             fn serialize_element<R : ::std::io::Write>
@@ -270,6 +279,14 @@ macro_rules! fourleaf_retrofit {
                             $(($special) $s_accessor,)*
                         })
                     },
+                )* $(
+                    $ca_disc_pat => {
+                        dst.write_enum(tag, $ca_disc_field_accessor)?;
+                        fourleaf_retrofit!(@_STRUCT_BODY_SER (dst) {
+                            $([$ca_tag] $ca_accessor,)*
+                            $(($ca_special) $ca_s_accessor,)*
+                        })
+                    },
                 )*}
             }
         }
@@ -277,6 +294,7 @@ macro_rules! fourleaf_retrofit {
         $($impl_deser)* {
             fourleaf_retrofit!(@_DESER_BOILERPLATE);
 
+            #[allow(unreachable_code)]
             fn deserialize_element($context: &$crate::de::Context,
                                    field: &mut $crate::stream::Field<R>)
                                    -> $crate::de::Result<Self> {
@@ -291,8 +309,19 @@ macro_rules! fourleaf_retrofit {
                             { $constructor }
                         })
                     },)*
-                    _ => Err($crate::de::Error::UnknownVariant(
-                        $context.to_string(), discriminant)),
+                    _discriminant => {
+                        $(
+                            let $ca_disc_field_name = _discriminant;
+                            return fourleaf_retrofit!(@_STRUCT_BODY_DESER
+                                                      (stream, $context) {
+                                $([$ca_tag] $ca_field_name: $ca_field_type,)*
+                                $(($ca_special) $ca_s_field_name: $ca_s_field_type,)*
+                                { $ca_constructor }
+                            });
+                        )*
+                        Err($crate::de::Error::UnknownVariant(
+                            $context.to_string(), discriminant))
+                    },
                 }
             }
         }
@@ -331,11 +360,17 @@ mod test {
         pub unknown: UnknownFields<'static>,
     }
 
+    #[derive(Debug, Clone, PartialEq, Eq)]
+    enum UnknownPreservingEnum {
+        Unit,
+        Unknown(u64, UnknownFields<'static>),
+    }
+
     mod declare {
         // Separate module to isolate imports
         use super::{SimpleEnum, SimpleStruct,
                     DelegatingEnum, DelegatingStruct,
-                    UnknownPreserving};
+                    UnknownPreserving, UnknownPreservingEnum};
 
         fourleaf_retrofit!(struct SimpleStruct : {} {} {
             |_context, this|
@@ -383,6 +418,22 @@ mod test {
             [1] foo: u32 = this.foo,
             (?) unknown: ::unknown::UnknownFields<'static> = this.unknown,
             { Ok(UnknownPreserving { foo: foo, unknown: unknown }) }
+        });
+
+        fourleaf_retrofit!(enum UnknownPreservingEnum : {} {
+            impl<R : ::std::io::Read, STYLE>
+            ::de::Deserialize<R, STYLE> for UnknownPreservingEnum
+            where ::unknown::UnknownFields<'static> : ::de::Deserialize<R, STYLE>
+        } {
+            |_context|
+            [1] UnknownPreservingEnum::Unit => {
+                { Ok(UnknownPreservingEnum::Unit) }
+            },
+            (?) UnknownPreservingEnum::Unknown(discriminant, ref fields) => {
+                (=) discriminant: u64 = discriminant,
+                (?) fields: ::unknown::UnknownFields<'static> = fields,
+                { Ok(UnknownPreservingEnum::Unknown(discriminant, fields)) }
+            },
         });
     }
 
@@ -528,6 +579,24 @@ mod test {
         assert_eq!(2, parsed.unknown.0.len());
         assert_eq!(2, parsed.unknown.0[0].0);
         assert_eq!(3, parsed.unknown.0[1].0);
+
+        let res = to_vec(parsed).unwrap();
+        assert_eq!(orig, res);
+    }
+
+    #[test]
+    fn handling_unknown_enum_variants() {
+        let mut config = Config::default();
+        config.ignore_unknown_fields = false;
+
+        let orig = parse("01 2A 41 01 42 02 00 00");
+        let parsed = from_slice_copy::<UnknownPreservingEnum>(
+            &orig, &config).unwrap();
+        match parsed {
+            UnknownPreservingEnum::Unknown(42, ref fields) =>
+                assert_eq!(2, fields.0.len()),
+            _ => panic!("unexpected result: {:?}", parsed),
+        }
 
         let res = to_vec(parsed).unwrap();
         assert_eq!(orig, res);
