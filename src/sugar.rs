@@ -14,9 +14,8 @@
 /// concepts in general; you should read the crate documentation for an
 /// introduction to these and more detail.
 ///
-/// This is much more flexible than the `fourleaf!` macro and does not require
-/// modifying the type definition itself, but as a result is generally more
-/// verbose and requires writing a lot of things twice.
+/// This is currently a bit verbose. At some point in the future there may be
+/// something nicer.
 ///
 /// The basic structure of the syntax for this macro is
 ///
