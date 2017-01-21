@@ -432,11 +432,26 @@ pub trait Deserialize<R : Read, STYLE = style::Copying> : Sized {
     /// ## Note
     ///
     /// If this method is implemented, all 32 of the `deserialize_array_*`
-    /// functions must also be implemented.
+    /// functions as well as `deserialize_slice` must also be implemented.
     #[allow(unused_variables)]
     fn deserialize_vec
         (context: &Context, field: &mut stream::Field<R>)
         -> Option<Result<Vec<Self>>>
+    { None }
+
+    /// If this type's `Serialize` implementation has special behaviour in
+    /// `serialize_slice`, perform the reverse operation here and write into
+    /// the given slice of values, or return `Err` if the slice is not the
+    /// appropriate length.
+    ///
+    /// ## Note
+    ///
+    /// If this method is implemented, all 32 of the `deserialize_array_*`
+    /// functions as well as `deserialize_vec` must also be implemented.
+    #[allow(unused_variables)]
+    fn deserialize_slice
+        (dst: &mut [Self], context: &Context, field: &mut stream::Field<R>)
+        -> Option<Result<()>>
     { None }
 
     /// If this type's `Serialize` implementation has special behaviour in
@@ -909,6 +924,25 @@ impl<R : Read, STYLE> Deserialize<R, STYLE> for u8 {
              .map_err(|e| e.into()))
     }
 
+    fn deserialize_slice(dst: &mut [u8], context: &Context,
+                         field: &mut stream::Field<R>)
+                         -> Option<Result<()>> {
+        let mut blob = match field.value.to_blob().context(context) {
+            Ok(blob) => blob,
+            Err(e) => return Some(Err(e.into())),
+        };
+
+        if blob.remaining() != (dst.len() as u64) {
+            return Some(Err(Error::InvalidValueMsg(
+                context.to_string(),
+                "blob is the not correct length")));
+        }
+
+        Some(blob.read_exact(dst).map(|_| ())
+             .map_err(stream::Error::from)
+             .context(context).map_err(Error::from))
+    }
+
     deser_bytes_as_array!(deserialize_array_0, 0);
     deser_bytes_as_array!(deserialize_array_1, 1);
     deser_bytes_as_array!(deserialize_array_2, 2);
@@ -1150,7 +1184,103 @@ des_small_array!(32, deserialize_array_32,
                  0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16,
                  17, 18, 19, 20, 21, 22, 23, 24, 25, 26, 27, 28, 29, 30, 31);
 
-// TODO Larger byte arrays
+#[allow(missing_docs)] #[doc(hidden)]
+pub struct LargeArrayAccum<T>(usize, T);
+
+macro_rules! des_large_array {
+    ($n:expr) => {
+        impl<T : Copy + Default> Default for LargeArrayAccum<[T;$n]> {
+            fn default() -> Self {
+                LargeArrayAccum(0, [T::default();$n])
+            }
+        }
+
+        impl<R : Read, STYLE, T : Copy + Default + Deserialize<R, STYLE>>
+        Deserialize<R, STYLE> for [T;$n] {
+            type Accum = LargeArrayAccum<Self>;
+
+            fn deserialize_element
+                (context: &Context, field: &mut stream::Field<R>) -> Result<Self>
+            {
+                let mut special = [T::default(); $n];
+                if let Some(handled) = T::deserialize_slice(
+                    &mut special, context, field)
+                {
+                    handled?;
+                    return Ok(special);
+                }
+
+                Self::deserialize_body(
+                    context, field.value.to_struct().context(context)?)
+            }
+
+            fn deserialize_field
+                (accum: &mut Self::Accum, context: &Context,
+                 field: &mut stream::Field<R>)
+                 -> Result<()>
+            {
+                if let Some(handled) = T::deserialize_slice(
+                    &mut accum.1, context, field)
+                {
+                    handled?;
+                    if 0 != accum.0 {
+                        return Err(Error::FieldOccursTooManyTimes(
+                            context.to_string(), 1));
+                    } else {
+                        accum.0 = $n;
+                        return Ok(());
+                    }
+                }
+
+                if accum.0 >= $n {
+                    Err(Error::FieldOccursTooManyTimes(
+                        context.to_string(), $n))
+                } else {
+                    accum.1[accum.0] = T::deserialize_element(context, field)?;
+                    accum.0 += 1;
+                    Ok(())
+                }
+            }
+
+            fn finish(accum: Self::Accum, context: &Context)
+                      -> Result<Self> {
+                if accum.0 < $n {
+                    if 0 == accum.0 {
+                        Err(Error::RequiredFieldMissing(
+                            context.to_string()))
+                    } else {
+                        Err(Error::FieldOccursTooFewTimes(
+                            context.to_string(),
+                            if T::serialized_as_slice() { 1 }
+                            else { $n }))
+                    }
+                } else {
+                    Ok(accum.1)
+                }
+            }
+        }
+    }
+}
+
+des_large_array!(64);
+des_large_array!(128);
+des_large_array!(256);
+des_large_array!(512);
+des_large_array!(1024);
+des_large_array!(2048);
+des_large_array!(4096);
+des_large_array!(8192);
+des_large_array!(16384);
+des_large_array!(32768);
+des_large_array!(65536);
+des_large_array!(131072);
+des_large_array!(262144);
+des_large_array!(524288);
+des_large_array!(1048576);
+des_large_array!(2097152);
+des_large_array!(4194304);
+des_large_array!(8388608);
+des_large_array!(16777216);
 
 macro_rules! des_struct {
     (($($stuff:tt)*);

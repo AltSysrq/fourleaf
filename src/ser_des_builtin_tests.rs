@@ -372,6 +372,39 @@ fn unknown_fields_ignored_by_default() {
     assert_eq!((1,2), res);
 }
 
+#[test]
+fn large_byte_array() {
+    let orig = [1u8;64];
+    let data = to_vec(&orig).unwrap();
+    assert_eq!(parse("81 40 \
+                      01 01 01 01 01 01 01 01 01 01 01 01 01 01 01 01 \
+                      01 01 01 01 01 01 01 01 01 01 01 01 01 01 01 01 \
+                      01 01 01 01 01 01 01 01 01 01 01 01 01 01 01 01 \
+                      01 01 01 01 01 01 01 01 01 01 01 01 01 01 01 01 \
+                      00"), data);
+
+    let res = from_slice_copy::<[u8;64]>(&data, &Config::default()).unwrap();
+    assert_eq!(&orig[..], &res[..]);
+}
+
+#[test]
+fn large_val_array() {
+    let orig = [1u32;64];
+    let data = to_vec(&orig).unwrap();
+    assert_eq!(parse("41 01 41 01 41 01 41 01 41 01 41 01 41 01 41 01 \
+                      41 01 41 01 41 01 41 01 41 01 41 01 41 01 41 01 \
+                      41 01 41 01 41 01 41 01 41 01 41 01 41 01 41 01 \
+                      41 01 41 01 41 01 41 01 41 01 41 01 41 01 41 01 \
+                      41 01 41 01 41 01 41 01 41 01 41 01 41 01 41 01 \
+                      41 01 41 01 41 01 41 01 41 01 41 01 41 01 41 01 \
+                      41 01 41 01 41 01 41 01 41 01 41 01 41 01 41 01 \
+                      41 01 41 01 41 01 41 01 41 01 41 01 41 01 41 01 \
+                      00"), data);
+
+    let res = from_slice_copy::<[u32;64]>(&data, &Config::default()).unwrap();
+    assert_eq!(&orig[..], &res[..]);
+}
+
 macro_rules! ecase {
     ($name:ident ($config:ident $input:expr => $ty:ty : $err:pat)
      $config_edits:block) => {
