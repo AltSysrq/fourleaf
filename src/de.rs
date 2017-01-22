@@ -10,6 +10,7 @@
 //! Defines traits and utilities for high-level deserialisation.
 
 use std::borrow::Cow;
+use std::cell::Cell;
 use std::char;
 use std::cmp::{Eq, Ord};
 use std::fmt;
@@ -173,11 +174,18 @@ quick_error! {
             description(err)
             display("{} at {}", err, wo)
         }
-        /// A collection being deserialised grew to be larger than the value of
+        /// The combined size of all variable-length collections being
+        /// deserialised grew to be larger than the value of
         /// `Config::max_collect`.
         MaxCollectExceeded(wo: String) {
-            description("collection size limit exceeded")
-            display("collection size limit exceeded at {}", wo)
+            description("collection size sum limit exceeded")
+            display("collection size sum limit exceeded at {}", wo)
+        }
+        /// The combined size of all blobs being deserialised into new buffers
+        /// grew to be larger than the value of `Config::max_blob`.
+        MaxBlobExceeded(wo: String) {
+            description("copied blob size sum limit exceeded")
+            display("copied blob size sum limit exceeded at {}", wo)
         }
         #[allow(missing_docs)]
         #[doc(hidden)]
@@ -226,7 +234,9 @@ impl Default for Config {
 /// Tracks contextual information during deserialisation.
 ///
 /// This is used for constructing helpful error messages and controlling
-/// recursion depth.
+/// recursion depth and other limits. Note that this does use interior
+/// mutability, so it is unwise to reuse the same `Context` for deserialising
+/// more than one object.
 ///
 /// `Context` objects are typically constructed on the stack and passed to
 /// sub-deserialisers by reference.
@@ -247,7 +257,15 @@ pub struct Context<'a> {
     /// The configuration to use when deserialising this level's immediate
     /// children.
     pub config: &'a Config,
+    stats: Cow<'a, ContextStats>,
     _non_public: (),
+}
+
+/// Records accumulated metrics over the course of deserialisation.
+#[derive(Debug, Clone, Default)]
+struct ContextStats {
+    collected: Cell<usize>,
+    total_blob: Cell<usize>,
 }
 
 impl<'a> Context<'a> {
@@ -259,6 +277,7 @@ impl<'a> Context<'a> {
             pos: 0,
             depth: 0,
             config: config,
+            stats: Cow::Owned(ContextStats::default()),
             _non_public: (),
         }
     }
@@ -275,6 +294,7 @@ impl<'a> Context<'a> {
                 pos: pos,
                 depth: self.depth + 1,
                 config: self.config,
+                stats: Cow::Borrowed(&*self.stats),
                 _non_public: (),
             })
         }
@@ -300,12 +320,27 @@ impl<'a> Context<'a> {
         }
     }
 
-    /// If `n + 1` is within the configured maximum collection size, return
-    /// `Ok`. Otherwise, return `Err`.
-    pub fn check_collect(&self, n: usize) -> Result<()> {
-        if n + 1 > self.config.max_collect {
+    /// If the current running collection count plus `n` is less than or equal
+    /// to `max_collect`, update the running collection count and return `Ok`.
+    /// Otherwise, return an error.
+    pub fn collect(&self, n: usize) -> Result<()> {
+        if self.config.max_collect - self.stats.collected.get() < n {
             Err(Error::MaxCollectExceeded(self.to_string()))
         } else {
+            self.stats.collected.set(self.stats.collected.get() + 1);
+            Ok(())
+        }
+    }
+
+    /// If the current running blob size sum plus `n` is less than or equal to
+    /// `max_blob`, update the running sum and return `Ok`. Otherwise, return
+    /// an error.
+    pub fn blob(&self, n: u64) -> Result<()> {
+        if ((self.config.max_blob - self.stats.total_blob.get()) as u64) < n {
+            Err(Error::MaxBlobExceeded(self.to_string()))
+        } else {
+            self.stats.total_blob.set(
+                self.stats.total_blob.get() + (n as usize));
             Ok(())
         }
     }
@@ -754,12 +789,14 @@ des_unary! {
 
 des_unary! {
     (impl<R : Read, STYLE> Deserialize<R, STYLE> for String);
-    |context, field| (
+    |context, field| ({
+        let mut blob = field.value.to_blob().context(context)?;
+        context.blob(blob.len())?;
         String::from_utf8(
-            field.value.to_blob().context(context)?
-            .read_fully(context.config.max_blob).context(context)?)
+            blob.read_fully(context.config.max_blob).context(context)?)
         .map_err(|e| Error::InvalidValue(context.to_string(),
-                                         Box::new(e)))?)
+                                         Box::new(e)))?
+    })
 }
 
 macro_rules! des_boxed {
@@ -918,10 +955,14 @@ impl<R : Read, STYLE> Deserialize<R, STYLE> for u8 {
 
     fn deserialize_vec(context: &Context, field: &mut stream::Field<R>)
                        -> Option<Result<Vec<u8>>> {
-        Some(field.value.to_blob()
-             .and_then(|b| b.read_fully(context.config.max_blob))
-             .context(context)
-             .map_err(|e| e.into()))
+        fn dv<R : Read>(context: &Context, field: &mut stream::Field<R>)
+                        -> Result<Vec<u8>> {
+            let mut blob = field.value.to_blob().context(context)?;
+            context.blob(blob.len())?;
+            Ok(blob.read_fully(context.config.max_blob).context(context)?)
+        }
+
+        Some(dv(context, field))
     }
 
     fn deserialize_slice(dst: &mut [u8], context: &Context,
@@ -1411,7 +1452,7 @@ Deserialize<R, STYLE> for Vec<T> {
             }
         }
 
-        context.check_collect(accum.1.len())?;
+        context.collect(1)?;
         accum.1.push(T::deserialize_element(context, field)?);
         Ok(())
     }
@@ -1441,7 +1482,7 @@ $($stuff)* {
         (accum: &mut Self, context: &Context,
          field: &mut stream::Field<R>) -> Result<()>
     {
-        context.check_collect(accum.len())?;
+        context.collect(1)?;
         accum.$meth(T::deserialize_element(context, field)?);
         Ok(())
     }
@@ -1515,7 +1556,7 @@ $($stuff)* {
         (accum: &mut Self, context: &Context,
          field: &mut stream::Field<R>) -> Result<()>
     {
-        context.check_collect(accum.len())?;
+        context.collect(1)?;
 
         let (k, v) = <(K, V) as Deserialize<R, STYLE>>::
             deserialize_element(context, field)?;

@@ -699,14 +699,14 @@
 //! the `Config` object.
 //!
 //! When copying byte slices into a buffer (e.g., `Vec<u8>` or `String`), the
-//! configuration field `max_blob` places a cap on the largest blob that will
-//! be deserialised. Larger blobs will result in an error. `max_blob` defaults
-//! to 64 kB.
+//! configuration field `max_blob` places a cap on the largest total size of
+//! blobs to be deserialised in this way. Larger blobs, or large numbers of
+//! smaller blobs, will result in an error. `max_blob` defaults to 64 kB.
 //!
 //! When populating a collection that has an unbounded cardinality (e.g.,
-//! `Vec<u64>`, `HashMap<String, String>`), an error will occur if the length
-//! of the collection exceeds `max_collect`. `max_collect` defaults to 256.
-//! This limit even applies to `UnknownFields`.
+//! `Vec<u64>`, `HashMap<String, String>`), an error will occur if the total
+//! length of all such collections exceeds `max_collect`. `max_collect`
+//! defaults to 256. This limit even applies to `UnknownFields`.
 //!
 //! The `recursion_limit` configuration sets the maximum nesting depth that
 //! will be deserialised.

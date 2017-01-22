@@ -441,7 +441,7 @@ ecase!(max_collect_exceeded_on_hash_map
        { config.max_collect = 4; });
 
 ecase!(max_blob_exceeded (config "81 0B 'hello world' 00" => String :
-                          Error::Stream(_, stream::Error::LargeBlob(..)))
+                          Error::MaxBlobExceeded(_))
        { config.max_blob = 5; });
 
 ecase!(unknown_field_rejected (config "42 00 00" => () :

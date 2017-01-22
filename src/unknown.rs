@@ -106,7 +106,7 @@ where Cow<'a, [u8]>: Deserialize<R, STYLE> {
         (this: &mut Self, context: &Context, field: &mut stream::Field<R>)
         -> Result<()>
     {
-        context.check_collect(this.0.len())?;
+        context.collect(1)?;
         this.0.push((field.tag, UnknownField::deserialize_element(
             context, field)?));
         Ok(())
