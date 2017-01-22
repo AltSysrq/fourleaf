@@ -21,6 +21,8 @@
 //! - Explicit tagging makes both backward- and forward-compatibility easy to
 //! maintain as desired.
 //!
+//! - Support for in-band padding, errors, or other signalling.
+//!
 //! ## Why use fourleaf?
 //!
 //! - You want a binary data format, so JSON/TOML/etc is out.
@@ -202,6 +204,512 @@
 //! recursion and allocations made for things like `Vec`s and `String`s. If you
 //! have deeply nested structures, large collections, or large strings, you may
 //! need to adjust the configuration as desired.
+//!
+//! # The fourleaf format
+//!
+//! The fourleaf format is built around exactly four types:
+//!
+//! - Arbitrary-width integers. (But note that the current implementation is
+//! limited to 64 bits.)
+//!
+//! - Blobs (i.e., arbitrary byte arrays).
+//!
+//! - Structs, or sequences of tag/value pairs terminated with an `EndOfStruct`
+//! marker.
+//!
+//! - Enums, essentially structs prefixed with an integer discriminant.
+//!
+//! Notably absent from this list is "null" or collections of any kind. This is
+//! because fourleaf essentially models every struct field as being a
+//! collection in and of itself by repeating the field as many times as needed;
+//! e.g., a plain `u32` simply restricts that collection to be exactly one
+//! element, whereas `Option<u32>` allows it to be zero or one, and `Vec<u32>`
+//! allows arbitrary repitition.
+//!
+//! Because of this, the exact way a type is serialised is somewhat
+//! context-sensitive. There are three general contexts:
+//!
+//! - "Struct body", which is also the top level. Things which are serialised
+//! as structs are written without any kind of header; other things get wrapped
+//! in a single-field struct.
+//!
+//! - "Struct field", where a value is directly contained within a struct.
+//! Here, collections are flattened as described above.
+//!
+//! - "Collection element", where a value must be represented as exactly one
+//! tag/value pair. In general, types which always serialise to exactly one
+//! tag/value pair behave the same as in the "struct field" context, but
+//! collections and so forth wrap themselves in a struct which contains all
+//! their values.
+//!
+//! To illustrate, let's start with a simple structure.
+//!
+//! ```no_run
+//! # #[macro_use] extern crate fourleaf;
+//! struct S(u32, Option<u32>, Vec<u32>);
+//!
+//! fourleaf_retrofit!(struct S : {} {} {
+//!   |_context, this|
+//!   [1] a: u32 = this.0,
+//!   [2] b: Option<u32> = this.1,
+//!   [3] c: Vec<u32> = &this.2,
+//!   { Ok(S(a, b, c)) }
+//! });
+//! # fn main() { }
+//! ```
+//!
+//! If we serialise the value `S(42, None, vec![])`, we get the following:
+//!
+//! ```text
+//! 41 2a       ; Field tag=1 type=integer value=42
+//! 00          ; End of struct
+//! ```
+//!
+//! Notice that there is no "start of struct" at the top level. Note also that
+//! fields `b` and `c` are totally unrepresented in the serialised form. Since
+//! `Option` and `Vec` are both treated as collections, and a collection with
+//! _n_ elements is represented as _n_ repititions of the field, there are thus
+//! 0 repittions of the field. If we instead populate everything, for example
+//! with `S(42, Some(1), vec![2, 3])`, we get
+//!
+//! ```text
+//! 41 2a       ; Field tag=1 type=integer value=42
+//! 42 01       ; Field tag=2 type=integer value=1
+//! 43 02       ; Field tag=3 type=integer value=2
+//! 43 03       ; Field tag=3 type=integer value=3
+//! 00          ; End of struct
+//! ```
+//!
+//! We can see here that field `c` was simply handled by writing two instances
+//! of the field without any wrapping. That is because the `Vec<u32>` is in
+//! "struct field" context.
+//!
+//! This flat representation obviously can't work when collections are nested,
+//! since there would be no way to recreate the nesting. This is why
+//! "collection element" context exists. We see it, for example, if we
+//! serialise `vec![Some(42u32), None]`:
+//!
+//! ```text
+//! c1          ; field tag=1 type=struct (element of vec)
+//!   41 2a     ; field tag=1 type=integer value=42
+//!   00        ; end of struct (element of vec)
+//! c1          ; field tag=1 type=struct (element of vec)
+//!   00        ; end of struct (element of vec)
+//! 00          ; end of struct (top-level)
+//! ```
+//!
+//! There are two interesting things here. First, since `Vec` finds itself at
+//! top-level, it is in "struct body" context, and so serialises as if it were
+//! a field of tag 1 in a struct containing just that field. Second, because
+//! `Option` is inside a collection, it instead nests itself inside a struct in
+//! a similar way. In the case of `None`, this inner struct ends up being
+//! completely empty.
+//!
+//! ## Built-in types
+//!
+//! fourleaf ships with built-in support for a large portion of `std`.
+//! Particularly, it aims to support everything that serde does out-of-the-box.
+//! A notable exception right now are the floating-point types, which do not
+//! currently have a defined fourleaf representation.
+//!
+//! All integer types serialise to integers. Signed integers are ZigZagged
+//! rather than sign-extended. `bool` is treated as an integer which is either
+//! 0 or 1.
+//!
+//! `PhantomData` serialises to integer 0.
+//!
+//! Slices, `Vec`, `VecDeque`, `LinkedList`, `BinaryHeap`, `BTreeSet`, and
+//! `HashSet` serialise the way collections were described above, except that
+//! `&[u8]` and `Vec<u8>` serialise to blobs instead of collections of
+//! integers. (Other collections have no special behaviour for `u8`.)
+//!
+//! `Option<T>` serialises as a collection of `T`.
+//!
+//! Arrays of size 0 to 32, as well as all powers of 2 up to 24, serialise the
+//! same way as the slices of the same type; but note that _deserialising_
+//! slices larger than 32 elements requires the elements to be both `Copy` and
+//! `Default`. This includes the special behaviours of `u8`.
+//!
+//! `HashMap<K,V>` and `BTreeMap<K,V>` serialise the same way as `[(K,V)]`.
+//!
+//! Tuples with 0 to 15 elements, inclusive, serialise as structs with
+//! sequential tags for each field starting from 1.
+//!
+//! `String` and `&str` serialise to blobs.
+//!
+//! `&T`, `&mut T`, `Box<T>`, `Rc<T>`, and `Arc<T>` serialise the same way as
+//! `T`.
+//!
+//! A number of other `std` types are supported; see `retrofit.rs` in the
+//! repository for their exact definitions.
+//!
+//! # Zero-Copy Support
+//!
+//! The types `&[u8]` and `&str` must, and `Cow` of the same things can, be
+//! used in "zero-copy" mode. In zero-copy mode, the deserialised values will
+//! reference the input buffer itself instead of being copied, which is
+//! obviously faster and requires less memory, but does make management more
+//! difficult and requires buffering the whole input first. In the case of
+//! `Cow`, this behaviour is selectable via the `_copy` vs `_borrow` functions,
+//! or the `STYLE` generic parameter to `Deserialize` when using the trait
+//! directly.
+//!
+//! ```
+//! #[macro_use] extern crate fourleaf;
+//! use std::borrow::Cow;
+//! use std::io::Read;
+//!
+//! #[derive(Debug, PartialEq)]
+//! struct ZeroCopyOnly<'a> {
+//!   s: &'a str,
+//! }
+//!
+//! #[derive(Debug, PartialEq)]
+//! struct EitherMode<'a> {
+//!   s: Cow<'a, str>,
+//! }
+//!
+//! fourleaf_retrofit!(struct ZeroCopyOnly<'a> : {
+//!   impl<'a> fourleaf::Serialize for ZeroCopyOnly<'a>
+//! } {
+//!   impl<'a, R : Read, STYLE> fourleaf::Deserialize<R, STYLE>
+//!   for ZeroCopyOnly<'a> where &'a str: fourleaf::Deserialize<R, STYLE>
+//! } {
+//!   |_context, this|
+//!   [1] s: &'a str = this.s,
+//!   { Ok(ZeroCopyOnly { s: s }) }
+//! });
+//! fourleaf_retrofit!(struct EitherMode<'a> : {
+//!   impl<'a> fourleaf::Serialize for EitherMode<'a>
+//! } {
+//!   impl<'a, R : Read, STYLE> fourleaf::Deserialize<R, STYLE>
+//!   for EitherMode<'a> where Cow<'a,str>: fourleaf::Deserialize<R, STYLE>
+//! } {
+//!   |_context, this|
+//!   [1] s: Cow<'a,str> = this.s,
+//!   { Ok(EitherMode { s: s }) }
+//! });
+//!
+//! # fn main() {
+//! // Some data we want to deserialise. It needs to be in a contiguous buffer.
+//! // Here we put it in a `Vec` and borrow that to demonstrate that this
+//! // works without a `'static` buffer.
+//! let data = b"\x81\x0Bhello world\x00".to_owned();
+//! let data = &data[..];
+//! // Do a zero-copy parse of data.
+//! let value = fourleaf::from_slice_borrow::<ZeroCopyOnly>(
+//!   data, &fourleaf::DeConfig::default()).unwrap();
+//! assert_eq!(ZeroCopyOnly { s: "hello world" }, value);
+//! // Not only is it the expected value, but the string is also pointing into
+//! // `data`.
+//! assert_eq!(&data[2..13] as *const [u8], value.s.as_bytes() as *const [u8]);
+//!
+//! // This line would not compile, because `&[u8]` does not support `Copying`
+//! // mode since it has no place to copy to.
+//! // let value = fourleaf::from_slice_copy::<ZeroCopyOnly>( // Compile error
+//! //   data, &fourleaf::DeConfig::default()).unwrap();
+//!
+//! // With `Cow`, we also can do zero-copy.
+//! let value = fourleaf::from_slice_borrow::<EitherMode>(
+//!   data, &fourleaf::DeConfig::default()).unwrap();
+//! assert_eq!(EitherMode { s: Cow::Borrowed("hello world") }, value);
+//! assert_eq!(&data[2..13] as *const [u8], value.s.as_bytes() as *const [u8]);
+//!
+//! // And `Cow` supports copying mode as well. This also lets us use a
+//! // `'static` lifetime since the life of the result does not depend on the
+//! // life of the input.
+//! let value = fourleaf::from_slice_copy::<EitherMode<'static>>(
+//!   data, &fourleaf::DeConfig::default()).unwrap();
+//! match value.s {
+//!   Cow::Owned(ref s) => assert_eq!("hello world", s),
+//!   _ => panic!("Didn't copy"),
+//! }
+//! # }
+//! ```
+//!
+//! # Maintaining Compatibility
+//!
+//! A large focus of fourleaf — both the format and the implementation — was
+//! the ability to maintain compatibility between older and newer software.
+//! Compatibility comes down to three aspects:
+//!
+//! - Backward-compatibility; whether a newer software version can understand
+//! values written by an older version.
+//!
+//! - Forward-compatibility; whether an older software version can, to a a
+//! reasonable extent, handle values written by a newer version.
+//!
+//! - Edit-compatibility; whether a program can perform read-modify-write
+//! operations on the subset of serialised data it understands without
+//! destroying serialised data it does not understand.
+//!
+//! ## Backwards-compatibility
+//!
+//! The set of possible changes to a type which are backwards-compatible mostly
+//! flow naturally from the serialised format.
+//!
+//! - Adding a field is backwards-compatible as long as the type accepts a
+//! cardinality of 0 (eg, `Option`, collections).
+//!
+//! - Widening an integer type is backwards-compatible.
+//!
+//! - Narrowing an integer type is backwards-compatible with the subset of
+//! values which still fall within the new range.
+//!
+//! - Changing the signedness of an integer type is **not**
+//! backwards-compatible.
+//!
+//! - Changing a non-collection type field to a collection of the original type
+//! is backwards-compatible (but the same change at top-level or within a
+//! collection is not).
+//!
+//! - Widening the set of acceptable cardinalities for a collection is
+//! backwards-compatible.
+//!
+//! - Deleting a field is backwards-compatible as long as
+//! `ignore_unknown_fields` is left enabled or the container has an unknown
+//! field handler.
+//!
+//! - Adding an enum variant is backwards-compatible.
+//!
+//! In many cases, it is possible to "paper over" compatibility concerns
+//! entirely in the code in `fourleaf_retrofit!`. For example:
+//!
+//! ```
+//! #[macro_use] extern crate fourleaf;
+//!
+//! mod v1 {
+//!   pub struct Message {
+//!     pub target: u64
+//!   }
+//!   fourleaf_retrofit!(struct Message : {} {} {
+//!     |_context, this|
+//!     [1] target: u64 = this.target,
+//!     { Ok(Message { target: target }) }
+//!   });
+//! }
+//!
+//! mod v2 {
+//!   pub struct Message {
+//!     pub target: u64,
+//!     // New in version 2: mandatory flag
+//!     pub frobnicate: bool,
+//!   }
+//!   fourleaf_retrofit!(struct Message : {} {} {
+//!     |_context, this|
+//!     [1] target: u64 = this.target,
+//!     // Version 1 did not include this field
+//!     [2] frobnicate: Option<bool> = Some(this.frobnicate),
+//!     { Ok(Message { target: target,
+//!                    frobnicate: frobnicate.unwrap_or(false) }) }
+//!   });
+//! }
+//!
+//! # fn main() {
+//! // Write a message with the V1 schema...
+//! let old_message = fourleaf::to_vec(v1::Message { target: 42 }).unwrap();
+//! // .. and then decode it with the V2 schema.
+//! let message = fourleaf::from_slice_copy::<v2::Message>(
+//!   &old_message, &fourleaf::DeConfig::default()).unwrap();
+//!
+//! assert_eq!(42, message.target);
+//! // Code outside of deserialisation doesn't need to care about the
+//! // compatibility issue.
+//! assert!(!message.frobnicate);
+//! # }
+//! ```
+//!
+//! ## Forwards-compatibility
+//!
+//! Forwards-compatibility is largely the reverse of backwards-compatibility;
+//! i.e., the change from version 1 to version 2 is forwards-compatible if a
+//! change from version 2 to version 1 would be backwards-compatible.
+//!
+//! Forwards-compatibility can be more difficult, though, since compatibility
+//! workarounds must be done in the serialisation side of the new version.
+//!
+//! ## Edit-compatibility
+//!
+//! In some cases, it is desirable to allow older versions to manipulate data
+//! written by newer versions while preserving things they don't understand.
+//! This can be accomplished via a catch-all "unknown fields" field on structs,
+//! and an "unknown variant" variant on enums. Beware that unlike other
+//! compatibility concerns, this cannot be confined to [de]serialisation logic;
+//! handling of unknowns becomes somewhat pervasive since it must be refletcted
+//! in the underyling types.
+//!
+//! Here is an example demonstrating both features:
+//!
+//! ```
+//! #[macro_use] extern crate fourleaf;
+//!
+//! mod v1 {
+//!   use fourleaf;
+//!   use fourleaf::adapt::Copied;
+//!
+//!   pub enum Operation {
+//!     Create,
+//!     Delete,
+//!     // For future expansion, if a new enum variant is added, its
+//!     // discriminant and inner fields are stored here instead of raising an
+//!     // error.
+//!     Unknown(u64, fourleaf::UnknownFields<'static>),
+//!   }
+//!
+//!   pub struct Message {
+//!     pub id: u32,
+//!     pub operation: Operation,
+//!     // Unknown fields will be saved here.
+//!     pub unknown: fourleaf::UnknownFields<'static>,
+//!   }
+//!
+//!   fourleaf_retrofit!(enum Operation : {} {} {
+//!     |_context|
+//!     [1] Operation::Create => {
+//!       { Ok(Operation::Create) }
+//!     },
+//!     [2] Operation::Delete => {
+//!       { Ok(Operation::Delete) }
+//!     },
+//!     (?) Operation::Unknown(discriminant, ref fields) => {
+//!       (=) discriminant: u64 = discriminant,
+//!       (?) fields: Copied<fourleaf::UnknownFields<'static>> = fields,
+//!       { Ok(Operation::Unknown(discriminant, fields.0)) }
+//!     }
+//!   });
+//!
+//!   fourleaf_retrofit!(struct Message : {} {} {
+//!     |_context, this|
+//!     [1] id: u32 = this.id,
+//!     [2] operation: Operation = &this.operation,
+//!     (?) unknown: Copied<fourleaf::UnknownFields<'static>> = &this.unknown,
+//!     { Ok(Message { id: id, operation: operation, unknown: unknown.0 }) }
+//!   });
+//! }
+//!
+//!
+//! mod v2 {
+//!   use fourleaf;
+//!   use fourleaf::adapt::Copied;
+//!
+//!   pub enum Operation {
+//!     Create,
+//!     Delete,
+//!     // New in v2. We could also have `UnknownFields` in here, but that has
+//!     // been elided here for clarity.
+//!     RenameTo(u32),
+//!     // For future expansion, if a new enum variant is added, its
+//!     // discriminant and inner fields are stored here instead of raising an
+//!     // error.
+//!     Unknown(u64, fourleaf::UnknownFields<'static>),
+//!   }
+//!
+//!   pub struct Message {
+//!     pub id: u32,
+//!     pub operation: Operation,
+//!     // New in v2
+//!     pub frobnicate: bool,
+//!     // Unknown fields will be saved here.
+//!     pub unknown: fourleaf::UnknownFields<'static>,
+//!   }
+//!
+//!   fourleaf_retrofit!(enum Operation : {} {} {
+//!     |_context|
+//!     [1] Operation::Create => {
+//!       { Ok(Operation::Create) }
+//!     },
+//!     [2] Operation::Delete => {
+//!       { Ok(Operation::Delete) }
+//!     },
+//!     [3] Operation::RenameTo(id) => {
+//!       [1] id: u32 = id,
+//!       { Ok(Operation::RenameTo(id)) }
+//!     },
+//!     (?) Operation::Unknown(discriminant, ref fields) => {
+//!       (=) discriminant: u64 = discriminant,
+//!       (?) fields: Copied<fourleaf::UnknownFields<'static>> = fields,
+//!       { Ok(Operation::Unknown(discriminant, fields.0)) }
+//!     }
+//!   });
+//!
+//!   fourleaf_retrofit!(struct Message : {} {} {
+//!     |_context, this|
+//!     [1] id: u32 = this.id,
+//!     [2] operation: Operation = &this.operation,
+//!     [3] frobnicate: Option<bool> = this.frobnicate,
+//!     (?) unknown: Copied<fourleaf::UnknownFields<'static>> = &this.unknown,
+//!     { Ok(Message { id: id, operation: operation,
+//!                    frobnicate: frobnicate.unwrap_or(false),
+//!                    unknown: unknown.0 }) }
+//!   });
+//! }
+//!
+//! # fn main() {
+//! let mut config = fourleaf::DeConfig::default();
+//! // Fail deserialisation if we would destroy anything.
+//! config.ignore_unknown_fields = false;
+//!
+//! // A v2 program creates a `Message` and serialises it.
+//! let data = fourleaf::to_vec(v2::Message {
+//!   id: 42,
+//!   frobnicate: true,
+//!   operation: v2::Operation::RenameTo(56),
+//!   unknown: Default::default(),
+//! }).unwrap();
+//!
+//! // Now a v1 program reads it in and edits a field and reserialises it.
+//! let mut val = fourleaf::from_slice_copy::<v1::Message>(&data, &config)
+//!     .unwrap();
+//! assert_eq!(42, val.id);
+//! val.id = 99;
+//! let data = fourleaf::to_vec(val).unwrap();
+//!
+//! // Finally, another v2 program reads that in. The non-v1 things are still
+//! // preserved.
+//! let val = fourleaf::from_slice_copy::<v2::Message>(&data, &config)
+//!     .unwrap();
+//! assert_eq!(99, val.id);
+//! assert!(val.frobnicate);
+//! match val.operation {
+//!   v2::Operation::RenameTo(56) => (),
+//!   _ => panic!("wrong operation"),
+//! }
+//! # }
+//! ```
+//!
+//! # Limitations
+//!
+//! ## This Implementation
+//!
+//! Integers wider than 64 bits are not supported.
+//!
+//! Inputs longer than 16 EB are not supported. Some operations are not
+//! supported on streams longer than 8 EB. Structs/enums cannot be nested more
+//! than 16 quintillion levels deep.
+//!
+//! The high-level deserialisation mechanism will construct each declared type
+//! on the stack before moving it to its final location. I.e., a large
+//! `Vec<u64>` is fine, but using a `[u64;16777216]` is probably unwise.
+//!
+//! ## Arteficial
+//!
+//! fourleaf places arteficial limits on the data that can be deserialised via
+//! the high-level API in order to help harden programs against malicious
+//! inputs. If you run afoul of these limits, you can change them by modifying
+//! the `Config` object.
+//!
+//! When copying byte slices into a buffer (e.g., `Vec<u8>` or `String`), the
+//! configuration field `max_blob` places a cap on the largest blob that will
+//! be deserialised. Larger blobs will result in an error. `max_blob` defaults
+//! to 64 kB.
+//!
+//! When populating a collection that has an unbounded cardinality (e.g.,
+//! `Vec<u64>`, `HashMap<String, String>`), an error will occur if the length
+//! of the collection exceeds `max_collect`. `max_collect` defaults to 256.
+//! This limit even applies to `UnknownFields`.
+//!
+//! The `recursion_limit` configuration sets the maximum nesting depth that
+//! will be deserialised.
 
 #![deny(missing_docs)]
 #![recursion_limit = "1024"]

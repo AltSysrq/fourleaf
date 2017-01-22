@@ -460,23 +460,3 @@ ser_map!(<K : Serialize + ::std::hash::Hash + ::std::cmp::Eq,
           V : Serialize,
           H : ::std::hash::BuildHasher> Serialize
          for ::std::collections::HashMap<K, V, H>);
-
-macro_rules! ser_struct {
-    ($t:ty : $($tag:tt : $field:ident),*) => {
-        impl Serialize for $t {
-            fn serialize_element<R : Write>(&self, dst: &mut Stream<R>,
-                                            tag: u8) -> Result<()> {
-                dst.write_struct(tag)?;
-                self.serialize_body(dst)
-            }
-
-            fn serialize_body<R : Write>(&self, dst: &mut Stream<R>)
-                                         -> Result<()> {
-                $(
-                    self.$field().serialize_field(dst, $tag)?;
-                )*
-                dst.write_end_struct()
-            }
-        }
-    }
-}

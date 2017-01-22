@@ -158,6 +158,10 @@
 /// # fn main() { }
 /// ```
 ///
+/// Having an unknown field handler effectively suppresses the
+/// `ignore_unknown_fields` configuration; i.e., an unknown field will alway
+/// simply be added to the catch-all field instead of resulting in an error.
+///
 /// ## Enum bodies
 ///
 /// An enum body begins with the name for the context variable in pipes. It is
