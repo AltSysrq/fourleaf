@@ -710,6 +710,45 @@
 //!
 //! The `recursion_limit` configuration sets the maximum nesting depth that
 //! will be deserialised.
+//!
+//! # Physical Format
+//!
+//! Knowing how fourleaf elements translate to bytes is not required to use
+//! fourleaf, but may make help debugging issues or writing alternate
+//! implementations.
+//!
+//! A fourleaf stream is a sequence of elements. Each element begins with a
+//! single byte. The upper two bits of this byte are the "type", and the lower
+//! 6 bits are the "tag".
+//!
+//! If the tag is zero, this is a special element, and the types map as follows:
+//!
+//! - 00 — End of struct.
+//! - 40 — End of document.
+//! - 80 — Exception. Followed by a blob.
+//! - C0 — Padding. Readers are usually expected to ignore padding.
+//!
+//! If the tag is non-zero, this is a struct field. The tag identifies the
+//! field being described, and the type is one of:
+//!
+//! - 00 — Enum. Followed by an integer indicating the discriminant, then
+//! elements specifying fields for the enum body.
+//!
+//! - 40 — Integer. Followed by an integer indicating the value.
+//!
+//! - 80 — Blob. Followed by a blob indicating the value.
+//!
+//! - C0 — Struct. Followed by elements specifying fields for the struct body.
+//!
+//! Integers are written as in [protobufs](https://developers.google.com/protocol-buffers/docs/encoding).
+//! That is, an integer is written as a sequence of little-endian 7-bit fields,
+//! with the high bit of each byte set if another byte follows. Signed integers
+//! are first ZigZagged (see `zigzag` in `wire.rs`) before being written.
+//!
+//! Readers MUST accept integers in denormalised form.
+//!
+//! A blob is simply an integer indicating the blob length in bytes, followed
+//! by exactly that number of bytes.
 
 #![deny(missing_docs)]
 #![recursion_limit = "1024"]
