@@ -29,7 +29,7 @@ pub fn to_vec<T : Serialize>(t: T) -> Result<Vec<u8>> {
 ///
 /// This creates a `Stream` with its default properties. If this is not
 /// desired, create a `Stream` manually and pass it to `to_stream`.
-pub fn to_writer<T : Serialize, W : Write>(writer: &mut W, t: T)
+pub fn to_writer<T : Serialize, W : Write>(writer: W, t: T)
                                            -> Result<()> {
     let mut stream = Stream::new(writer);
     t.serialize_body(&mut stream)?;
