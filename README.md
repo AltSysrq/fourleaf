@@ -39,6 +39,17 @@ Non-features:
 
 See the [documentation](https://docs.rs/fourleaf) for more information.
 
+## Status
+
+Experimental.
+
+- The underlying binary format is very unlikely to change.
+
+- The builtin serialisers (e.g, `Vec`, `HashMap`, …) are unlikely to change,
+  but might.
+
+- There will probably be breaking changes to the API before 1.0.
+
 ## Contribution
 
 Unless you explicitly state otherwise, any contribution intentionally submitted
